@@ -825,3 +825,43 @@ fn multiline_attributes_move_along_z() {
     ok(&mut s, &format!("(vla-put-InsertionPoint (vlax-ename->vla-object {e}) (vlax-3d-point 0 0 5))"));
     assert_eq!(ml_z(&s), Some(5.0), "InsertionPoint at z 5 from z 3 lifts it by 2 more");
 }
+
+/// A 3D face's box spans its corners' heights.
+#[test]
+fn a_3d_face_bounding_box_spans_its_corner_heights() {
+    let mut s = session();
+    let corners = [Vec3::new(0.0, 0.0, 1.0), Vec3::new(4.0, 0.0, 2.0), Vec3::new(4.0, 3.0, 6.0), Vec3::new(0.0, 3.0, 1.0)];
+    let e = add(&mut s, EntityKind::Face3d(cadcraft_doc::Face3d { corners, hidden_edges: 0 }));
+    ok(&mut s, &format!("(vla-GetBoundingBox (vlax-ename->vla-object {e}) 'lo 'hi)"));
+    assert_eq!(ok(&mut s, "(vlax-safearray->list lo)"), "(0.0 0.0 1.0)");
+    assert_eq!(ok(&mut s, "(vlax-safearray->list hi)"), "(4.0 3.0 6.0)");
+}
+
+/// Shared nested blocks are measured once per level: ten references per level, eleven levels
+/// deep (10^11 leaves) finishes at once.
+#[test]
+fn nested_shared_blocks_bound_quickly() {
+    let mut s = session();
+    ok(
+        &mut s,
+        r#"(progn
+  (entmake '((0 . "BLOCK") (2 . "L0") (70 . 0) (10 0.0 0.0 0.0)))
+  (entmake '((0 . "LINE") (8 . "0") (10 0.0 0.0 0.0) (11 1.0 1.0 2.0)))
+  (entmake '((0 . "ENDBLK")))
+  (setq lvl 1)
+  (repeat 11
+    (entmake (list '(0 . "BLOCK") (cons 2 (strcat "L" (itoa lvl))) '(70 . 0) '(10 0.0 0.0 0.0)))
+    (setq k 0)
+    (repeat 10
+      (entmake (list '(0 . "INSERT") '(8 . "0") (cons 2 (strcat "L" (itoa (1- lvl)))) (list 10 (float k) 0.0 0.0)))
+      (setq k (1+ k)))
+    (entmake '((0 . "ENDBLK")))
+    (setq lvl (1+ lvl)))
+  (entmake '((0 . "INSERT") (8 . "0") (2 . "L11") (10 0.0 0.0 5.0))))"#,
+    );
+    let start = std::time::Instant::now();
+    ok(&mut s, "(vla-GetBoundingBox (vlax-ename->vla-object (entlast)) 'lo 'hi)");
+    assert!(start.elapsed().as_secs() < 10, "took {:?}", start.elapsed());
+    near(&mut s, "(caddr (vlax-safearray->list lo))", 5.0);
+    near(&mut s, "(caddr (vlax-safearray->list hi))", 7.0);
+}

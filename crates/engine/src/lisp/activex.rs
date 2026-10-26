@@ -13,6 +13,7 @@
 //! safearrays through `vla-get-…` and as lists through `vlax-get` and `vlax-invoke`, as in
 //! AutoCAD.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use cadcraft_color::Color;
@@ -970,18 +971,36 @@ fn z_at(e: &Entity, p: Vec2) -> f64 {
 
 /// The lowest and highest z of an entity's geometry (bounding boxes are measured in plan). A
 /// block reference spans its contents' z, scaled and lifted to where it is inserted; nesting is
-/// followed to [`cadcraft_doc::MAX_BLOCK_DEPTH`].
+/// followed to [`cadcraft_doc::MAX_BLOCK_DEPTH`]. Each block's contents are measured once per
+/// depth, so many references to shared nested blocks stay linear.
 fn z_range(d: &Drawing, e: &Entity, depth: usize) -> (f64, f64) {
+    z_range_cached(d, e, depth, &mut HashMap::new())
+}
+
+/// A block's contents' z span, by block name and nesting depth.
+type ZCache = HashMap<(String, usize), Option<(f64, f64)>>;
+
+fn z_range_cached(d: &Drawing, e: &Entity, depth: usize, cache: &mut ZCache) -> (f64, f64) {
     let span = |zs: &mut dyn Iterator<Item = f64>| zs.fold(None, |r: Option<(f64, f64)>, z| Some(r.map_or((z, z), |(a, b)| (a.min(z), b.max(z)))));
     let r = match &e.kind {
         EntityKind::Line(l) => span(&mut [l.a.z, l.b.z].into_iter()),
         EntityKind::Polyline3d(p) => span(&mut p.points.iter().map(|q| q.z)),
+        EntityKind::Solid(s) | EntityKind::Trace(s) => span(&mut s.corners.iter().map(|q| q.z)),
+        EntityKind::Face3d(f) => span(&mut f.corners.iter().map(|q| q.z)),
         EntityKind::Insert(i) if depth < cadcraft_doc::MAX_BLOCK_DEPTH => d.block(&i.block).and_then(|b| {
-            let inner = b
-                .entities
-                .iter()
-                .map(|c| z_range(d, c, depth + 1))
-                .fold(None, |r: Option<(f64, f64)>, (lo, hi)| Some(r.map_or((lo, hi), |(a, z)| (a.min(lo), z.max(hi)))))?;
+            let key = (i.block.clone(), depth);
+            let inner = match cache.get(&key) {
+                Some(r) => *r,
+                None => {
+                    let r = b
+                        .entities
+                        .iter()
+                        .map(|c| z_range_cached(d, c, depth + 1, cache))
+                        .fold(None, |r: Option<(f64, f64)>, (lo, hi)| Some(r.map_or((lo, hi), |(a, z)| (a.min(lo), z.max(hi)))));
+                    cache.insert(key, r);
+                    r
+                }
+            }?;
             let place = |z: f64| i.insert.z + i.scale.z * (z - b.base.z);
             let (p, q) = (place(inner.0), place(inner.1));
             Some((p.min(q), p.max(q)))
@@ -1046,6 +1065,8 @@ fn entity_z(e: &Entity) -> f64 {
         EntityKind::Insert(i) => i.insert.z,
         EntityKind::Text(t) => t.insert.z,
         EntityKind::MText(t) => t.insert.z,
+        EntityKind::Solid(s) | EntityKind::Trace(s) => s.corners[0].z,
+        EntityKind::Face3d(f) => f.corners[0].z,
         _ => 0.0,
     }
 }
