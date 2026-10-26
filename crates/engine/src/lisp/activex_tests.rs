@@ -1019,3 +1019,28 @@ fn intersections_use_the_crossing_segments_height() {
     let v = ok(&mut s, &format!("(vlax-invoke (vlax-ename->vla-object {p}) 'IntersectWith (vlax-ename->vla-object {l}) acExtendNone)"));
     assert_eq!(v, "(5.0 0.0 10.0)");
 }
+
+/// IntersectWith on geometry it can't intersect yet (an ellipse, a block reference) is an
+/// automation error, not "no crossings"; a point simply has none (Codex round 13).
+#[test]
+fn intersect_with_unsupported_geometry_is_an_error() {
+    let mut s = session();
+    let l = line(&mut s, [-10.0, 0.0], [10.0, 0.0]);
+    ok(&mut s, "(entmake '((0 . \"ELLIPSE\") (10 0.0 0.0 0.0) (11 5.0 0.0 0.0) (40 . 0.5) (41 . 0.0) (42 . 6.283185307179586)))");
+    let caught = |s: &mut Session, other: &str| {
+        ok(
+            s,
+            &format!(
+                "(vl-catch-all-error-p (vl-catch-all-apply 'vlax-invoke (list (vlax-ename->vla-object {l}) 'IntersectWith (vlax-ename->vla-object {other}) 0)))"
+            ),
+        )
+    };
+    assert_eq!(caught(&mut s, "(entlast)"), "T", "ellipse");
+    ok(
+        &mut s,
+        "(entmake '((0 . \"BLOCK\") (2 . \"IB\") (70 . 0) (10 0.0 0.0 0.0))) (entmake '((0 . \"LINE\") (10 0.0 -5.0 0.0) (11 0.0 5.0 0.0))) (entmake '((0 . \"ENDBLK\"))) (entmake '((0 . \"INSERT\") (2 . \"IB\") (10 0.0 0.0 0.0)))",
+    );
+    assert_eq!(caught(&mut s, "(entlast)"), "T", "block reference");
+    ok(&mut s, "(entmake '((0 . \"POINT\") (10 3.0 0.0 0.0)))");
+    assert_eq!(caught(&mut s, "(entlast)"), "nil", "point");
+}

@@ -129,7 +129,8 @@ done fails with an automation error (`Automation Error. Key not found`, `… On 
 - **Methods:** `vla-<method>`, `vlax-invoke` (arrays as lists) and `vlax-invoke-method`:
   GetBoundingBox (the symbols passed are set, to safearrays or with `vlax-invoke` to lists),
   Move, Copy, Delete, Update, IntersectWith (`acExtendNone`, `…ThisEntity`, `…OtherEntity`,
-  `…Both`; crossings in plan count only where both objects are at the same height), Item, Add,
+  `…Both`; on lines, arcs, circles and polylines, crossings in plan counting only where both
+  crossing pieces are at the same height; other objects give an automation error), Item, Add,
   Regen, StartUndoMark and EndUndoMark (a routine is one undo step already).
   An object found in a block definition converts to an entity name and back, and `entget` reads
   that name (without a 410 layout group).
@@ -151,7 +152,9 @@ done fails with an automation error (`Automation Error. Key not found`, `… On 
   parameter past its ends, gives nil. An arc's area is the region between it and its chord; an
   open polyline's is measured as if closed.
 
-Not yet: ellipses and splines in the curve functions, multi-dimensional safearrays, the OCS of
+Not yet: ellipses and splines in the curve functions and IntersectWith, crossings of objects
+that meet only out of plan (a vertical line, or two sloped lines one above the other in plan),
+multi-dimensional safearrays, the OCS of
 extruded objects, renaming or deleting layers through ActiveX, the paper space layouts in the
 Blocks collection, reactors (`vlr-…`) and other ActiveX objects (dimension, hatch and table
 properties, `InsertBlock`, `AddLine`…).

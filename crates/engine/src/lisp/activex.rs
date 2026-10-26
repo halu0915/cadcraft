@@ -1094,24 +1094,31 @@ fn entity_z(e: &Entity) -> f64 {
     }
 }
 
-/// The line and arc pieces of an entity (a circle is a full arc).
-fn pieces(e: &Entity) -> Vec<Segment> {
-    e.kind
-        .prims()
-        .into_iter()
-        .filter_map(|p| match p {
-            cadcraft_doc::Prim::Seg(s) => Some(s),
-            cadcraft_doc::Prim::Circle(c) => Some(Segment::Arc { arc: GArc::new(c.center, c.radius, 0.0, 0.0), ccw: true }),
-            _ => None,
-        })
-        .collect()
+/// The line and arc pieces of an entity (a circle is a full arc). Geometry they can't describe
+/// yet (ellipses, splines, construction lines and rays, objects such as block references or text
+/// with no line or arc pieces) is an error rather than "no crossings"; a point has none.
+fn pieces(e: &Entity) -> Result<Vec<Segment>, LispError> {
+    let unsupported = || LispError::new(format!("IntersectWith with {} is not available yet", object_name(&e.kind)));
+    let mut out = Vec::new();
+    for p in e.kind.prims() {
+        match p {
+            cadcraft_doc::Prim::Seg(s) => out.push(s),
+            cadcraft_doc::Prim::Circle(c) => out.push(Segment::Arc { arc: GArc::new(c.center, c.radius, 0.0, 0.0), ccw: true }),
+            cadcraft_doc::Prim::Ellipse(_) | cadcraft_doc::Prim::Spline(_) | cadcraft_doc::Prim::Infinite { .. } => return Err(unsupported()),
+            cadcraft_doc::Prim::Point(_) | cadcraft_doc::Prim::Fill(_) => {}
+        }
+    }
+    if out.is_empty() && !matches!(e.kind, EntityKind::Point(_)) {
+        return Err(unsupported());
+    }
+    Ok(out)
 }
 
 /// Where two entities cross. `mode`: 0 neither extended (acExtendNone), 1 this one extended, 2
 /// the other, 3 both (lines become infinite, arcs full circles).
 fn intersections(a: &Entity, b: &Entity, mode: i64) -> Result<Vec<Vec3>, LispError> {
     const MAX_PAIRS: usize = 1_000_000;
-    let (pa, pb) = (pieces(a), pieces(b));
+    let (pa, pb) = (pieces(a)?, pieces(b)?);
     if pa.len().saturating_mul(pb.len()) > MAX_PAIRS {
         // Too many piece pairs to check in one call: say so rather than report no crossings.
         return Err(automation("Too many segments to intersect"));
