@@ -67,6 +67,8 @@ fn items(p: &PickSet) -> Vec<Handle> {
 /// selection set picks objects, and `pause` waits for the user. A command not finished by the
 /// arguments stays active for the next `command` call. No arguments: cancel the active command.
 pub fn command(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
+    // A command can take entities out and put others in without changing the count.
+    ctx.env.order = None;
     if a.is_empty() {
         if ctx.s.running.is_some() {
             ctx.s.cancel();
@@ -518,6 +520,7 @@ pub fn entupd(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
 
 /// `(entdel ename)`: delete an entity, or bring back one this routine's drawing deleted.
 pub fn entdel(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
+    ctx.env.order = None;
     arity(&a, 1, 1)?;
     let h = ename(&a[0])?;
     let Ok(d) = ctx.s.doc_mut() else { return Ok(Flow::Value(Value::Nil)) };
@@ -541,16 +544,19 @@ pub fn entdel(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
 
 /// Every entity's handle in creation order (model space and layouts), cached per drawing. The
 /// cache is keyed on the drawing's address and on what changes when entities come and go (its
-/// revision, next handle and count): a routine changing the drawing in place keeps its address,
-/// and `entlast` after a second `entmake` must not answer the first.
+/// next handle and count): a routine changing the drawing in place keeps its address, and
+/// `entlast` after a second `entmake` must not answer the first. Editing an entity (`entmod`, a
+/// property) keeps the order, so a walk that edits as it goes stays linear; `entdel` and
+/// `command`, which can swap entities without changing either, drop the cache.
 fn handles_in_order(ctx: &mut Ctx<'_>) -> Arc<Vec<Handle>> {
     let Ok(st) = ctx.s.state() else { return Arc::default() };
-    let key = (Arc::as_ptr(&st.doc) as usize, st.revision, st.doc.handseed, st.doc.entity_count());
+    let key = (Arc::as_ptr(&st.doc) as usize, st.doc.handseed, st.doc.entity_count());
     if let Some((k, v)) = &ctx.env.order
         && *k == key
     {
         return v.clone();
     }
+    ctx.env.order_builds = ctx.env.order_builds.saturating_add(1);
     let d = &st.doc;
     let mut v: Vec<Handle> = d.model.handles();
     for l in &d.layouts {

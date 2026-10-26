@@ -1153,27 +1153,36 @@ fn intersections(a: &Entity, b: &Entity, mode: i64) -> Result<Vec<Vec3>, LispErr
 }
 
 /// Drop repeated points, keeping the first of each in order. Two points are the same within 1e-9
-/// units plus the rounding their coordinates carry (about 1e-5 at 1e9), so crossings a fraction
-/// of a unit apart stay distinct anywhere in the drawing. A grid of tolerance-sized cells keeps
-/// this linear: each point looks only at its own and the neighbouring cells.
+/// units plus the rounding their own coordinates carry (about 1e-5 at 1e9), so crossings a
+/// fraction of a unit apart stay distinct, and a distant crossing doesn't widen the tolerance for
+/// others. Points go in grids by tolerance size (cells a power of two at least twice it): two
+/// equal points have nearly equal tolerances, so each looks only in its own size and the two next
+/// to it, at its own cell and the neighbouring ones, which keeps this linear.
 pub(super) fn dedup_points(raw: Vec<Vec3>) -> Vec<Vec3> {
-    let size = raw.iter().fold(0.0f64, |m, p| m.max(p.x.abs()).max(p.y.abs()).max(p.z.abs()));
-    let tol = 1e-9 + 1e-14 * size;
-    let cell = |v: f64| (v / tol).floor() as i64;
-    let mut grid: HashMap<(i64, i64, i64), Vec<Vec3>> = HashMap::new();
+    let tol = |p: Vec3| 1e-9 + 1e-14 * p.x.abs().max(p.y.abs()).max(p.z.abs());
+    let level = |t: f64| (2.0 * t).log2().ceil().clamp(-1074.0, 1023.0) as i32;
+    let cells = |p: Vec3, l: i32| {
+        let size = 2f64.powi(l);
+        ((p.x / size).floor() as i64, (p.y / size).floor() as i64, (p.z / size).floor() as i64)
+    };
+    let mut grid: HashMap<(i32, i64, i64, i64), Vec<Vec3>> = HashMap::new();
     let mut out = Vec::new();
     for p in raw {
-        let c = (cell(p.x), cell(p.y), cell(p.z));
-        let seen = (-1..=1).any(|dx: i64| {
-            (-1..=1).any(|dy: i64| {
-                (-1..=1).any(|dz: i64| {
-                    grid.get(&(c.0.saturating_add(dx), c.1.saturating_add(dy), c.2.saturating_add(dz)))
-                        .is_some_and(|v| v.iter().any(|q| (*q - p).len() <= tol))
+        let l = level(tol(p));
+        let seen = (l.saturating_sub(1)..=l.saturating_add(1)).any(|m| {
+            let c = cells(p, m);
+            (-1..=1).any(|dx: i64| {
+                (-1..=1).any(|dy: i64| {
+                    (-1..=1).any(|dz: i64| {
+                        grid.get(&(m, c.0.saturating_add(dx), c.1.saturating_add(dy), c.2.saturating_add(dz)))
+                            .is_some_and(|v| v.iter().any(|q| (*q - p).len() <= tol(p).max(tol(*q))))
+                    })
                 })
             })
         });
         if !seen {
-            grid.entry(c).or_default().push(p);
+            let c = cells(p, l);
+            grid.entry((l, c.0, c.1, c.2)).or_default().push(p);
             out.push(p);
         }
     }

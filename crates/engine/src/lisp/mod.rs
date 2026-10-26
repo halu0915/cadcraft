@@ -58,7 +58,9 @@ pub struct Env {
     pub deleted: HashMap<Handle, (cadcraft_doc::Space, Arc<cadcraft_doc::Entity>)>,
     /// Every entity's handle in creation order, for the drawing state it was taken from
     /// (`entnext`; see `drawing::handles_in_order` for the key).
-    pub order: Option<((usize, u64, u64, usize), Arc<Vec<Handle>>)>,
+    pub order: Option<((usize, u64, usize), Arc<Vec<Handle>>)>,
+    /// How many times that order was built (a walk that only edits entities builds it once).
+    pub order_builds: u64,
     /// `tblnext`'s place in each table.
     pub tblnext: HashMap<String, usize>,
     /// A block definition `entmake` has begun (a BLOCK list) and not yet ended (ENDBLK): the
@@ -80,6 +82,7 @@ impl Default for Env {
             next_file: 1,
             deleted: HashMap::new(),
             order: None,
+            order_builds: 0,
             tblnext: HashMap::new(),
             pending_block: None,
             printed_at: None,
@@ -213,6 +216,13 @@ impl Session {
     pub fn lisp_var(&self, name: &str) -> Value {
         let uid = self.state().map(|s| s.uid).unwrap_or(0);
         self.lisp.envs.get(&uid).map(|e| e.get(name)).unwrap_or_default()
+    }
+
+    /// How many times the active drawing's entity order was built (tests).
+    #[cfg(test)]
+    pub(crate) fn lisp_env_order_builds(&self) -> u64 {
+        let uid = self.state().map(|s| s.uid).unwrap_or(0);
+        self.lisp.envs.get(&uid).map_or(0, |e| e.order_builds)
     }
 
     /// Evaluate LISP source (a command-line expression or a file's contents). `print`: show the

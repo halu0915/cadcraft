@@ -1044,3 +1044,53 @@ fn intersect_with_unsupported_geometry_is_an_error() {
     ok(&mut s, "(entmake '((0 . \"POINT\") (10 3.0 0.0 0.0)))");
     assert_eq!(caught(&mut s, "(entlast)"), "nil", "point");
 }
+
+/// A distant crossing doesn't widen the tolerance for crossings elsewhere (Codex round 14).
+#[test]
+fn a_far_crossing_does_not_merge_near_ones() {
+    let pts = vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.1, 0.0, 0.0), Vec3::new(1e14, 0.0, 0.0)];
+    assert_eq!(super::activex::dedup_points(pts.clone()), pts);
+    // Points equal within their own rounding still merge, at any size.
+    let same = vec![Vec3::new(1e14, 0.0, 0.0), Vec3::new(1e14 + 0.5, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0), Vec3::new(2.0 + 1e-12, 0.0, 0.0)];
+    assert_eq!(super::activex::dedup_points(same), vec![Vec3::new(1e14, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0)]);
+}
+
+/// Walking a drawing with entnext while entmod edits each entity keeps one cached order: the
+/// walk stays linear (Codex round 14: an edit isn't a change of which entities exist).
+#[test]
+fn entnext_walk_with_entmod_stays_linear() {
+    let mut s = session();
+    {
+        let d = s.doc_mut().unwrap();
+        for i in 0..20_000 {
+            let x = i as f64;
+            d.add(&Space::Model, Common::default(), EntityKind::Line(Line { a: Vec3::new(x, 0.0, 0.0), b: Vec3::new(x, 1.0, 0.0) })).unwrap();
+        }
+    }
+    s.touch();
+    let start = std::time::Instant::now();
+    let n = ok(
+        &mut s,
+        r#"(progn (setq n 0 e (entnext))
+  (while e (setq ed (entget e)) (entmod (subst (cons 62 3) (cons 62 (cdr (assoc 62 ed))) ed)) (setq n (1+ n) e (entnext e)))
+  n)"#,
+    );
+    assert_eq!(n, "20000");
+    assert!(start.elapsed().as_secs() < 60, "took {:?}", start.elapsed());
+    let builds = s.lisp_env_order_builds();
+    assert!(builds <= 2, "the order was rebuilt {builds} times for 20000 edits");
+}
+
+/// entdel taking one entity out and bringing another back leaves the count and next handle as
+/// they were; entnext still sees the change.
+#[test]
+fn entnext_follows_entdel_swaps() {
+    let mut s = session();
+    let a = line(&mut s, [0.0, 0.0], [1.0, 0.0]);
+    let b = line(&mut s, [0.0, 1.0], [1.0, 1.0]);
+    let c = line(&mut s, [0.0, 2.0], [1.0, 2.0]);
+    let _ = c;
+    ok(&mut s, &format!("(setq a {a} b {b})"));
+    let v = ok(&mut s, "(progn (entdel b) (setq first1 (entnext)) (entdel a) (entdel b) (list (equal (entnext) b) (equal first1 a)))");
+    assert_eq!(v, "(T T)");
+}
