@@ -889,7 +889,7 @@ fn invoke(ctx: &mut Ctx<'_>, o: &Vla, m: &str, args: &[Value], as_lists: bool) -
             let a = entity_of(d, o).ok_or_else(|| automation("Object was erased"))?;
             let b = entity_of(d, other).ok_or_else(|| automation("Object was erased"))?;
             // Crossings in plan that are also at the same height on both objects.
-            let pts: Vec<Vec3> = intersections(&a, &b, mode)
+            let pts: Vec<Vec3> = intersections(&a, &b, mode)?
                 .into_iter()
                 .filter_map(|p| {
                     let (za, zb) = (z_at(&a, p), z_at(&b, p));
@@ -1100,20 +1100,23 @@ fn pieces(e: &Entity) -> Vec<Segment> {
 
 /// Where two entities cross. `mode`: 0 neither extended (acExtendNone), 1 this one extended, 2
 /// the other, 3 both (lines become infinite, arcs full circles).
-fn intersections(a: &Entity, b: &Entity, mode: i64) -> Vec<Vec2> {
-    const MAX_PIECES: usize = 100_000;
+fn intersections(a: &Entity, b: &Entity, mode: i64) -> Result<Vec<Vec2>, LispError> {
+    const MAX_PAIRS: usize = 1_000_000;
     let (pa, pb) = (pieces(a), pieces(b));
-    if pa.len().saturating_mul(pb.len()) > MAX_PIECES * 10 {
-        return Vec::new();
+    if pa.len().saturating_mul(pb.len()) > MAX_PAIRS {
+        // Too many piece pairs to check in one call: say so rather than report no crossings.
+        return Err(automation("Too many segments to intersect"));
     }
-    let near = |segs: &[Segment], p: Vec2| segs.iter().any(|s| s.closest(p).dist(p) <= 1e-7 * (1.0 + p.x.abs().max(p.y.abs())));
+    // A crossing of one piece pair must lie on the piece of the object that isn't extended
+    // (a crossing on another of its pieces is found with that piece's own pair).
+    let near = |seg: &Segment, p: Vec2| seg.closest(p).dist(p) <= 1e-7 * (1.0 + p.x.abs().max(p.y.abs()));
     let mut raw: Vec<Vec2> = Vec::new();
     for s in &pa {
         for t in &pb {
             for p in intersect_ext(s, t, mode != 0) {
                 let keep = match mode {
-                    1 => near(&pb, p),
-                    2 => near(&pa, p),
+                    1 => near(t, p),
+                    2 => near(s, p),
                     _ => true,
                 };
                 if keep && p.is_finite() {
@@ -1122,7 +1125,7 @@ fn intersections(a: &Entity, b: &Entity, mode: i64) -> Vec<Vec2> {
             }
         }
     }
-    dedup_points(raw)
+    Ok(dedup_points(raw))
 }
 
 /// Drop repeated points (within a tolerance relative to the coordinates' size), keeping the

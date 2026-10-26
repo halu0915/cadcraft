@@ -948,3 +948,20 @@ fn constant_width_clears_vertex_widths() {
         other => panic!("{other:?}"),
     }
 }
+
+/// Two objects with more piece pairs than one call checks give a catchable error, not "no
+/// crossings".
+#[test]
+fn too_many_segments_to_intersect_is_an_error() {
+    let mut s = session();
+    let zig: Vec<([f64; 2], f64)> = (0..1_100).map(|i| ([i as f64, if i % 2 == 0 { 0.0 } else { 1.0 }], 0.0)).collect();
+    let a = pline(&mut s, &zig, false);
+    let b = pline(&mut s, &zig, false);
+    let v = ok(
+        &mut s,
+        &format!(
+            "(vl-catch-all-error-p (vl-catch-all-apply 'vlax-invoke (list (vlax-ename->vla-object {a}) 'IntersectWith (vlax-ename->vla-object {b}) 0)))"
+        ),
+    );
+    assert_eq!(v, "T");
+}
