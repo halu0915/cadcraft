@@ -916,3 +916,35 @@ fn intersection_points_are_deduplicated_in_order() {
     assert_eq!(super::activex::dedup_points(many).len(), 200_000);
     assert!(start.elapsed().as_secs() < 10, "took {:?}", start.elapsed());
 }
+
+/// An open polyline whose last vertex keeps a bulge closes with a straight edge for its area.
+#[test]
+fn an_open_polyline_ignores_its_last_bulge_for_area() {
+    let mut s = session();
+    let e = pline(&mut s, &[([0.0, 0.0], 0.0), ([10.0, 0.0], 0.0), ([10.0, 10.0], 1.0)], false);
+    near(&mut s, &format!("(vlax-curve-getArea {e})"), 50.0);
+}
+
+/// Setting ConstantWidth drops per-vertex widths.
+#[test]
+fn constant_width_clears_vertex_widths() {
+    let mut s = session();
+    let mut a = PolyVertex::new(Vec2::new(0.0, 0.0));
+    a.start_width = 2.0;
+    a.end_width = 3.0;
+    let e = add(
+        &mut s,
+        EntityKind::LwPolyline(LwPolyline {
+            vertices: vec![a, PolyVertex::new(Vec2::new(5.0, 0.0))],
+            closed: false,
+            const_width: 0.0,
+            elevation: 0.0,
+            plinegen: false,
+        }),
+    );
+    ok(&mut s, &format!("(vla-put-ConstantWidth (vlax-ename->vla-object {e}) 0)"));
+    match &s.doc().unwrap().model.last().unwrap().kind {
+        EntityKind::LwPolyline(l) => assert!(l.vertices.iter().all(|v| v.start_width == 0.0 && v.end_width == 0.0)),
+        other => panic!("{other:?}"),
+    }
+}

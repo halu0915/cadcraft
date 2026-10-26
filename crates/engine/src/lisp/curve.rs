@@ -326,7 +326,8 @@ impl Curve {
                 }
             }
             Curve::Poly { points3: Some(points), .. } => newell_area(points),
-            Curve::Poly { vertices, .. } => Polyline { vertices: vertices.clone(), closed: true }.area().abs(),
+            // An open polyline closes with a straight edge; its last bulge isn't a segment.
+            Curve::Poly { vertices, closed, .. } => Polyline { vertices: vertices.clone(), closed: *closed }.area().abs(),
         }
     }
 }

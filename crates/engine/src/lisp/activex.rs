@@ -697,6 +697,11 @@ fn entity_put(d: &Drawing, e: &Entity, p: &str, v: &Value) -> Result<Entity, Pro
                     return Err(PropErr::Lisp(automation("Invalid argument")));
                 }
                 l.const_width = w;
+                // One width for the whole polyline: the per-vertex widths go.
+                for v in &mut l.vertices {
+                    v.start_width = 0.0;
+                    v.end_width = 0.0;
+                }
             }
             (EntityKind::Polyline3d(l), "CLOSED") => l.closed = truthy(v),
             (EntityKind::Text(t), "TEXTSTRING") => t.value = string(v)?,
