@@ -685,3 +685,49 @@ fn string_safearrays_share_their_strings() {
         assert!(std::sync::Arc::ptr_eq(&have, &want));
     }
 }
+
+/// The element types are Visual LISP's: any other is refused (a huge one overflowed the variant
+/// type before).
+#[test]
+fn safearray_types_are_checked() {
+    let mut s = session();
+    for t in ["2147483647", "0", "7", "-1"] {
+        assert!(eval(&mut s, &format!("(vlax-make-safearray {t} '(0 . 0))")).unwrap_err().contains("safearray type"), "{t}");
+    }
+    assert_eq!(ok(&mut s, "(vlax-variant-type (vlax-make-safearray vlax-vbVariant '(0 . 0)))"), "8204");
+}
+
+/// The current layer can't be frozen through ActiveX, as LAYER refuses; another layer can.
+#[test]
+fn the_current_layer_cannot_be_frozen() {
+    let mut s = session();
+    ok(&mut s, "(setq doc (vla-get-ActiveDocument (vlax-get-acad-object)) other (vla-add (vla-get-Layers doc) \"OTHER\"))");
+    assert!(eval(&mut s, "(vla-put-Freeze (vla-get-ActiveLayer doc) :vlax-true)").unwrap_err().contains("current layer"));
+    assert!(!s.doc().unwrap().layer("0").unwrap().frozen);
+    assert_eq!(ok(&mut s, "(vla-put-Freeze (vla-get-ActiveLayer doc) :vlax-false)"), "nil");
+    ok(&mut s, "(vla-put-Freeze other :vlax-true)");
+    assert!(s.doc().unwrap().layer("OTHER").unwrap().frozen);
+}
+
+/// A new insertion point moves a block reference with its attributes.
+#[test]
+fn insertion_point_moves_the_attributes_too() {
+    let mut s = session();
+    ok(&mut s, r#"(entmake '((0 . "BLOCK") (2 . "AB") (70 . 2) (10 0.0 0.0 0.0)))"#);
+    ok(&mut s, r#"(entmake '((0 . "ATTDEF") (10 1.0 0.0 0.0) (40 . 1.0) (1 . "v") (2 . "TAG") (3 . "Tag?") (70 . 0)))"#);
+    ok(&mut s, r#"(entmake '((0 . "ENDBLK")))"#);
+    ok(&mut s, r#"(command "_.-insert" "AB" '(10.0 10.0) 1 1 0 "val")"#);
+    let h = s.doc().unwrap().model.last().unwrap().handle;
+    let attrib_at = |s: &Session| match &s.doc().unwrap().entity(h).unwrap().kind {
+        EntityKind::Insert(i) => i.attribs.first().map(|a| (a.text.insert.x, a.text.insert.y)),
+        _ => None,
+    };
+    let before = attrib_at(&s).expect("the reference has its attribute");
+    ok(&mut s, &format!("(vla-put-InsertionPoint (vlax-ename->vla-object (handent \"{}\")) (vlax-3d-point 20 10 0))", h.hex()));
+    let after = attrib_at(&s).unwrap();
+    assert!((after.0 - before.0 - 10.0).abs() < 1e-9 && (after.1 - before.1).abs() < 1e-9, "{before:?} -> {after:?}");
+    match &s.doc().unwrap().entity(h).unwrap().kind {
+        EntityKind::Insert(i) => assert_eq!((i.insert.x, i.insert.y), (20.0, 10.0)),
+        other => panic!("{other:?}"),
+    }
+}

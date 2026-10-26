@@ -536,6 +536,10 @@ fn put_prop(ctx: &mut Ctx<'_>, o: &Vla, p: &str, v: &Value) -> Result<(), PropEr
             Ok(())
         }
         (Vla::Layer(name), _) => {
+            // As LAYER does: the current layer can't be frozen.
+            if p == "FREEZE" && truthy(v) && str_sysvar(ctx, "CLAYER").eq_ignore_ascii_case(name) {
+                return Err(PropErr::Lisp(automation("Invalid layer: the current layer can't be frozen")));
+            }
             let d = doc_mut(ctx)?;
             let lt = if p == "LINETYPE" { Some(linetype_arg(d, v)?) } else { None };
             let l = d.layer_mut(name).ok_or_else(|| automation("Object was erased"))?;
@@ -606,6 +610,21 @@ fn positive(v: &Value) -> Result<f64, LispError> {
 
 fn entity_put(d: &Drawing, e: &Entity, p: &str, v: &Value) -> Result<Entity, PropErr> {
     let mut n = e.clone();
+    if p == "INSERTIONPOINT" {
+        // The whole object moves with it: a reference's attributes, a text's alignment point.
+        let at = match &n.kind {
+            EntityKind::Insert(i) => i.insert,
+            EntityKind::Text(t) => t.insert,
+            EntityKind::MText(t) => t.insert,
+            _ => return Err(PropErr::Unknown),
+        };
+        let to = point_arg(v)?;
+        n.kind.transform(&Mat3::translate(Vec2::new(to.x - at.x, to.y - at.y)));
+        if to.z != at.z && !shift_z(&mut n.kind, to.z - at.z) {
+            return Err(PropErr::Unknown);
+        }
+        return Ok(n);
+    }
     let c = &mut n.common;
     match p {
         "LAYER" => {
@@ -624,7 +643,6 @@ fn entity_put(d: &Drawing, e: &Entity, p: &str, v: &Value) -> Result<Entity, Pro
                 let name = string(v)?;
                 i.block = d.block(&name).map(|b| b.name.clone()).ok_or_else(|| automation("Key not found"))?;
             }
-            (EntityKind::Insert(i), "INSERTIONPOINT") => i.insert = point_arg(v)?,
             (EntityKind::Insert(i), "ROTATION") => i.rotation = number(v)?,
             (EntityKind::Insert(i), "XSCALEFACTOR") => i.scale.x = nonzero(v)?,
             (EntityKind::Insert(i), "YSCALEFACTOR") => i.scale.y = nonzero(v)?,
@@ -650,11 +668,9 @@ fn entity_put(d: &Drawing, e: &Entity, p: &str, v: &Value) -> Result<Entity, Pro
             (EntityKind::Polyline3d(l), "CLOSED") => l.closed = truthy(v),
             (EntityKind::Text(t), "TEXTSTRING") => t.value = string(v)?,
             (EntityKind::Text(t), "HEIGHT") => t.height = positive(v)?,
-            (EntityKind::Text(t), "INSERTIONPOINT") => t.insert = point_arg(v)?,
             (EntityKind::Text(t), "ROTATION") => t.rotation = number(v)?,
             (EntityKind::MText(t), "TEXTSTRING") => t.contents = string(v)?,
             (EntityKind::MText(t), "HEIGHT") => t.height = positive(v)?,
-            (EntityKind::MText(t), "INSERTIONPOINT") => t.insert = point_arg(v)?,
             (EntityKind::MText(t), "ROTATION") => t.rotation = number(v)?,
             _ => return Err(PropErr::Unknown),
         },
@@ -1214,6 +1230,9 @@ fn vlax_make_safearray(_ctx: &mut Ctx<'_>, a: Vec<Value>) -> F {
         return Err(LispError::new("safearrays of more than one dimension are not available yet"));
     }
     let Value::Int(vtype) = a[0] else { return Err(LispError::bad_arg("fixnump", &a[0])) };
+    if ![VB_INTEGER, VB_LONG, VB_SINGLE, VB_DOUBLE, VB_STRING, VB_OBJECT, VB_BOOLEAN, VB_VARIANT].contains(&vtype) {
+        return Err(LispError::new(format!("bad argument value: safearray type {vtype}")));
+    }
     let (Value::Int(lo), Value::Int(hi)) = (a[1].car(), a[1].cdr()) else { return Err(LispError::bad_arg("safearray bounds", &a[1])) };
     let n = i64::from(hi) - i64::from(lo) + 1;
     if !(0..=MAX_SAFEARRAY).contains(&n) {
@@ -1335,7 +1354,7 @@ fn vlax_variant_type(_ctx: &mut Ctx<'_>, a: Vec<Value>) -> F {
         Value::Real(_) => VB_DOUBLE,
         Value::Str(_) => VB_STRING,
         Value::Vla(_) => VB_OBJECT,
-        Value::SafeArray(sa) => VB_ARRAY + sa.vtype,
+        Value::SafeArray(sa) => VB_ARRAY.checked_add(sa.vtype).unwrap_or(VB_ARRAY),
         Value::Sym(s) if s.name() == VLAX_TRUE || s.name() == VLAX_FALSE => VB_BOOLEAN,
         _ => VB_VARIANT,
     })))
