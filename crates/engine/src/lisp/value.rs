@@ -102,13 +102,17 @@ pub fn check_string_len(len: usize) -> Result<(), LispError> {
     if len > MAX_STRING { Err(LispError::quit(format!("out of memory: string longer than {MAX_STRING} bytes"))) } else { Ok(()) }
 }
 
-/// A built-in's result: a new string (one nothing else holds) is checked and charged.
+/// A built-in's result: a new string or safearray (one nothing else holds) is checked and
+/// charged against the run's byte budget, so a routine keeping many large arrays stops with an
+/// error instead of taking all memory.
 pub fn charge_result(v: &Value) -> Result<(), LispError> {
-    if let Value::Str(s) = v
-        && Arc::strong_count(s) == 1
-    {
-        check_string_len(s.len())?;
-        charge_bytes(s.len())?;
+    match v {
+        Value::Str(s) if Arc::strong_count(s) == 1 => {
+            check_string_len(s.len())?;
+            charge_bytes(s.len())?;
+        }
+        Value::SafeArray(a) if Arc::strong_count(a) == 1 => charge_bytes(a.element_count().saturating_mul(std::mem::size_of::<Value>()))?,
+        _ => {}
     }
     Ok(())
 }
@@ -120,32 +124,46 @@ impl Drop for Cons {
             LIVE_CELLS.fetch_add(1, Ordering::Relaxed);
         }
         // Unlink everything this cell alone holds (the rest of the list, nested lists in its
-        // car, function bodies) one cell at a time, so nothing recurses on the stack.
+        // car, function bodies, safearrays' elements) one value at a time, so nothing recurses
+        // on the stack.
         let mut work = Vec::new();
         keep_for_drop(&mut work, std::mem::take(&mut self.car));
         keep_for_drop(&mut work, std::mem::take(&mut self.cdr));
-        while let Some(v) = work.pop() {
-            match v {
-                Value::Cons(c) => {
-                    if let Ok(mut cell) = Arc::try_unwrap(c) {
-                        keep_for_drop(&mut work, std::mem::take(&mut cell.car));
-                        keep_for_drop(&mut work, std::mem::take(&mut cell.cdr));
-                    }
+        drop_all(work);
+    }
+}
+
+/// Drop the values on a work list without recursing: what each one alone holds goes on the list
+/// in turn.
+fn drop_all(mut work: Vec<Value>) {
+    while let Some(v) = work.pop() {
+        match v {
+            Value::Cons(c) => {
+                if let Ok(mut cell) = Arc::try_unwrap(c) {
+                    keep_for_drop(&mut work, std::mem::take(&mut cell.car));
+                    keep_for_drop(&mut work, std::mem::take(&mut cell.cdr));
                 }
-                Value::Func(f) => {
-                    if let Ok(mut func) = Arc::try_unwrap(f) {
-                        keep_for_drop(&mut work, std::mem::take(&mut func.body));
-                    }
-                }
-                _ => {}
             }
+            Value::Func(f) => {
+                if let Ok(mut func) = Arc::try_unwrap(f) {
+                    keep_for_drop(&mut work, std::mem::take(&mut func.body));
+                }
+            }
+            Value::SafeArray(a) => {
+                if let Ok(mut arr) = Arc::try_unwrap(a) {
+                    for v in arr.take_items() {
+                        keep_for_drop(&mut work, v);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
 
 /// Values that can hold others go on the work list; atoms are dropped here.
 fn keep_for_drop(work: &mut Vec<Value>, v: Value) {
-    if matches!(v, Value::Cons(_) | Value::Func(_)) {
+    if matches!(v, Value::Cons(_) | Value::Func(_) | Value::SafeArray(_)) {
         work.push(v);
     }
 }
@@ -234,6 +252,29 @@ impl SafeArray {
     /// A copy of the elements.
     pub fn to_vec(&self) -> Vec<Value> {
         self.items.lock().map(|v| v.clone()).unwrap_or_default()
+    }
+    /// The elements, taken out (the array is left empty).
+    fn take_items(&mut self) -> Vec<Value> {
+        match self.items.get_mut() {
+            Ok(v) => std::mem::take(v),
+            Err(poisoned) => std::mem::take(poisoned.into_inner()),
+        }
+    }
+    /// How many elements the array has (for the memory budget).
+    pub fn element_count(&self) -> usize {
+        self.items.lock().map(|v| v.len()).unwrap_or(0)
+    }
+}
+
+impl Drop for SafeArray {
+    /// Elements that hold other values (lists holding arrays holding lists…) are dropped one at
+    /// a time, as cons cells are: a deep chain must not overflow the stack.
+    fn drop(&mut self) {
+        let mut work = Vec::new();
+        for v in self.take_items() {
+            keep_for_drop(&mut work, v);
+        }
+        drop_all(work);
     }
 }
 

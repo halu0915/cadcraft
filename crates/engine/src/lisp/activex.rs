@@ -765,9 +765,9 @@ fn invoke(ctx: &mut Ctx<'_>, o: &Vla, m: &str, args: &[Value], as_lists: bool) -
             if b.is_empty() || !b.min.is_finite() || !b.max.is_finite() {
                 return Err(automation("Null extents"));
             }
-            let z = entity_z(&e);
-            ctx.env.set(lo, out(point_sa(Vec3::new(b.min.x, b.min.y, z))));
-            ctx.env.set(hi, out(point_sa(Vec3::new(b.max.x, b.max.y, z))));
+            let (z0, z1) = z_range(&e);
+            ctx.env.set(lo, out(point_sa(Vec3::new(b.min.x, b.min.y, z0))));
+            ctx.env.set(hi, out(point_sa(Vec3::new(b.max.x, b.max.y, z1))));
             Ok(Value::Nil)
         }
         (Vla::Entity { .. }, "MOVE") => {
@@ -776,6 +776,10 @@ fn invoke(ctx: &mut Ctx<'_>, o: &Vla, m: &str, args: &[Value], as_lists: bool) -
             let d = doc(ctx)?;
             let mut e = (*writable_entity(d, o)?).clone();
             e.kind.transform(&Mat3::translate(Vec2::new(to.x - from.x, to.y - from.y)));
+            let dz = to.z - from.z;
+            if dz != 0.0 && !shift_z(&mut e.kind, dz) {
+                return Err(LispError::new(format!("moving {} along Z is not available yet", object_name(&e.kind))));
+            }
             let d = doc_mut(ctx)?;
             if !replace_entity(d, o, e) {
                 return Err(automation("Object was erased"));
@@ -886,6 +890,55 @@ fn invoke(ctx: &mut Ctx<'_>, o: &Vla, m: &str, args: &[Value], as_lists: bool) -
     }
 }
 
+/// The lowest and highest z of an entity's geometry (bounding boxes are measured in plan).
+fn z_range(e: &Entity) -> (f64, f64) {
+    let span = |zs: &mut dyn Iterator<Item = f64>| zs.fold(None, |r: Option<(f64, f64)>, z| Some(r.map_or((z, z), |(a, b)| (a.min(z), b.max(z)))));
+    let r = match &e.kind {
+        EntityKind::Line(l) => span(&mut [l.a.z, l.b.z].into_iter()),
+        EntityKind::Polyline3d(p) => span(&mut p.points.iter().map(|q| q.z)),
+        _ => None,
+    };
+    r.unwrap_or_else(|| {
+        let z = entity_z(e);
+        (z, z)
+    })
+}
+
+/// Move an entity along Z by `dz` (`EntityKind::transform` is 2D). `false` for a kind this
+/// doesn't know how to lift.
+fn shift_z(kind: &mut EntityKind, dz: f64) -> bool {
+    match kind {
+        EntityKind::Line(l) => {
+            l.a.z += dz;
+            l.b.z += dz;
+        }
+        EntityKind::Point(p) => p.p.z += dz,
+        EntityKind::Circle(c) => c.center.z += dz,
+        EntityKind::Arc(a) => a.center.z += dz,
+        EntityKind::Ellipse(e) => e.center.z += dz,
+        EntityKind::LwPolyline(p) => p.elevation += dz,
+        EntityKind::Polyline3d(p) => p.points.iter_mut().for_each(|q| q.z += dz),
+        EntityKind::Insert(i) => {
+            i.insert.z += dz;
+            for a in &mut i.attribs {
+                a.text.insert.z += dz;
+                if let Some(p) = a.text.align_pt.as_mut() {
+                    p.z += dz;
+                }
+            }
+        }
+        EntityKind::Text(t) => {
+            t.insert.z += dz;
+            if let Some(p) = t.align_pt.as_mut() {
+                p.z += dz;
+            }
+        }
+        EntityKind::MText(t) => t.insert.z += dz,
+        _ => return false,
+    }
+    true
+}
+
 /// The z of an entity's geometry (for bounding boxes and intersections, which are 2D).
 fn entity_z(e: &Entity) -> f64 {
     match &e.kind {
@@ -893,6 +946,9 @@ fn entity_z(e: &Entity) -> f64 {
         EntityKind::Circle(c) => c.center.z,
         EntityKind::Arc(a) => a.center.z,
         EntityKind::LwPolyline(p) => p.elevation,
+        EntityKind::Polyline3d(p) => p.points.first().map_or(0.0, |q| q.z),
+        EntityKind::Point(p) => p.p.z,
+        EntityKind::Ellipse(e) => e.center.z,
         EntityKind::Insert(i) => i.insert.z,
         EntityKind::Text(t) => t.insert.z,
         EntityKind::MText(t) => t.insert.z,

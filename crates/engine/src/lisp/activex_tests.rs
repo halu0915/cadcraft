@@ -553,3 +553,40 @@ fn entmakex_answers_the_new_name() {
     assert_eq!(v, "(ENAME T \"12.5\")");
     assert_eq!(ok(&mut s, r#"(entmakex '((0 . "NOSUCHTHING")))"#), "nil");
 }
+
+/// Moving along Z lifts the object; a 3D line's bounding box spans its lowest and highest z.
+#[test]
+fn move_and_bounding_box_in_z() {
+    let mut s = session();
+    let e = add(&mut s, EntityKind::Line(Line { a: Vec3::new(0.0, 0.0, 0.0), b: Vec3::new(10.0, 10.0, 5.0) }));
+    ok(&mut s, &format!("(setq o (vlax-ename->vla-object {e}))"));
+    ok(&mut s, "(vla-GetBoundingBox o 'mn 'mx)");
+    assert_eq!(ok(&mut s, "(list (vlax-safearray->list mn) (vlax-safearray->list mx))"), "((0.0 0.0 0.0) (10.0 10.0 5.0))");
+    ok(&mut s, "(vlax-invoke o 'Move '(0 0 0) '(1 0 2))");
+    assert_eq!(ok(&mut s, "(list (vlax-curve-getStartPoint o) (vlax-curve-getEndPoint o))"), "((1.0 0.0 2.0) (11.0 10.0 7.0))");
+    let c = add(&mut s, EntityKind::Circle(Circle { center: Vec3::new(0.0, 0.0, 0.0), radius: 1.0 }));
+    ok(&mut s, &format!("(vla-Move (vlax-ename->vla-object {c}) (vlax-3d-point 0 0 0) (vlax-3d-point 0 0 3))"));
+    assert_eq!(ok(&mut s, &format!("(vlax-curve-getStartPoint {c})")), "(1.0 0.0 3.0)");
+}
+
+/// A chain of arrays holding lists holding arrays, a hundred thousand deep, drops without
+/// overflowing the stack.
+#[test]
+fn a_deep_chain_of_safearrays_drops() {
+    let _heavy = super::value::HEAVY_CELLS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = session();
+    let code = "(setq a nil) (repeat 100000 (setq x (vlax-make-safearray vlax-vbVariant '(0 . 0))) \
+                (vlax-safearray-put-element x 0 (list a)) (setq a x)) (setq a nil x nil) 'done";
+    assert_eq!(ok(&mut s, code), "DONE");
+}
+
+/// Large safearrays a routine keeps count against its memory budget: it stops with an error
+/// instead of taking all memory.
+#[test]
+fn safearrays_count_against_the_memory_budget() {
+    let mut s = session();
+    s.lisp.limits.string_bytes = 64 << 20;
+    let code = "(setq keep nil) (repeat 1000 (setq keep (cons (vlax-make-safearray vlax-vbDouble '(0 . 999999)) keep))) 'kept";
+    let e = eval(&mut s, code).unwrap_err();
+    assert!(e.contains("out of memory"), "{e}");
+}
