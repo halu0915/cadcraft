@@ -889,13 +889,7 @@ fn invoke(ctx: &mut Ctx<'_>, o: &Vla, m: &str, args: &[Value], as_lists: bool) -
             let a = entity_of(d, o).ok_or_else(|| automation("Object was erased"))?;
             let b = entity_of(d, other).ok_or_else(|| automation("Object was erased"))?;
             // Crossings in plan that are also at the same height on both objects.
-            let pts: Vec<Vec3> = intersections(&a, &b, mode)?
-                .into_iter()
-                .filter_map(|p| {
-                    let (za, zb) = (z_at(&a, p), z_at(&b, p));
-                    ((za - zb).abs() <= 1e-9 * (1.0 + za.abs().max(zb.abs()))).then(|| Vec3::new(p.x, p.y, za))
-                })
-                .collect();
+            let pts: Vec<Vec3> = intersections(&a, &b, mode)?;
             if pts.is_empty() && as_lists {
                 return Ok(Value::Nil);
             }
@@ -948,6 +942,21 @@ fn invoke(ctx: &mut Ctx<'_>, o: &Vla, m: &str, args: &[Value], as_lists: bool) -
             }
         }
     }
+}
+
+/// The z at plan point `p` of piece number `k` of `e` (in [`pieces`]`(e)` order, which for a 3D
+/// polyline is one piece per segment, the closing one last): along a sloped line or that 3D
+/// polyline segment, the height there; any other object is flat at its elevation.
+fn z_on(e: &Entity, k: usize, p: Vec2) -> f64 {
+    if let EntityKind::Polyline3d(pl) = &e.kind
+        && let (Some(a), Some(b)) = (pl.points.get(k), pl.points.get((k + 1) % pl.points.len().max(1)))
+    {
+        let d = b.xy() - a.xy();
+        let l2 = d.x * d.x + d.y * d.y;
+        let t = if l2 <= f64::EPSILON { 0.0 } else { ((p.x - a.x) * d.x + (p.y - a.y) * d.y) / l2 };
+        return a.z + (b.z - a.z) * t;
+    }
+    z_at(e, p)
 }
 
 /// The z of an entity at plan point `p` on it: along a sloped line or 3D polyline segment, the
@@ -1100,7 +1109,7 @@ fn pieces(e: &Entity) -> Vec<Segment> {
 
 /// Where two entities cross. `mode`: 0 neither extended (acExtendNone), 1 this one extended, 2
 /// the other, 3 both (lines become infinite, arcs full circles).
-fn intersections(a: &Entity, b: &Entity, mode: i64) -> Result<Vec<Vec2>, LispError> {
+fn intersections(a: &Entity, b: &Entity, mode: i64) -> Result<Vec<Vec3>, LispError> {
     const MAX_PAIRS: usize = 1_000_000;
     let (pa, pb) = (pieces(a), pieces(b));
     if pa.len().saturating_mul(pb.len()) > MAX_PAIRS {
@@ -1112,17 +1121,23 @@ fn intersections(a: &Entity, b: &Entity, mode: i64) -> Result<Vec<Vec2>, LispErr
     // How close counts as on it: relative to the piece's own size, plus the rounding a point that
     // far from the origin carries (about 1e-5 at 1e9) -- not a fraction of the coordinates.
     let near = |seg: &Segment, p: Vec2| seg.closest(p).dist(p) <= 1e-9 * (1.0 + seg.len()) + 1e-14 * p.x.abs().max(p.y.abs());
-    let mut raw: Vec<Vec2> = Vec::new();
-    for s in &pa {
-        for t in &pb {
+    let mut raw: Vec<Vec3> = Vec::new();
+    for (i, s) in pa.iter().enumerate() {
+        for (j, t) in pb.iter().enumerate() {
             for p in intersect_ext(s, t, mode != 0) {
                 let keep = match mode {
                     1 => near(t, p),
                     2 => near(s, p),
                     _ => true,
                 };
-                if keep && p.is_finite() {
-                    raw.push(p);
+                if !keep || !p.is_finite() {
+                    continue;
+                }
+                // The heights of the two pieces that cross here (not of whichever piece of a 3D
+                // polyline is nearest in plan: two can overlap there at different heights).
+                let (za, zb) = (z_on(a, i, p), z_on(b, j, p));
+                if (za - zb).abs() <= 1e-9 + 1e-14 * za.abs().max(zb.abs()) {
+                    raw.push(Vec3::new(p.x, p.y, za));
                 }
             }
         }
@@ -1130,22 +1145,28 @@ fn intersections(a: &Entity, b: &Entity, mode: i64) -> Result<Vec<Vec2>, LispErr
     Ok(dedup_points(raw))
 }
 
-/// Drop repeated points (within a tolerance relative to the coordinates' size), keeping the
-/// first of each in order. A grid of tolerance-sized cells keeps this linear: each point looks
-/// only at its own and the eight neighbouring cells.
-pub(super) fn dedup_points(raw: Vec<Vec2>) -> Vec<Vec2> {
-    let size = raw.iter().fold(0.0f64, |m, p| m.max(p.x.abs()).max(p.y.abs()));
-    let tol = 1e-9 * (1.0 + size);
+/// Drop repeated points, keeping the first of each in order. Two points are the same within 1e-9
+/// units plus the rounding their coordinates carry (about 1e-5 at 1e9), so crossings a fraction
+/// of a unit apart stay distinct anywhere in the drawing. A grid of tolerance-sized cells keeps
+/// this linear: each point looks only at its own and the neighbouring cells.
+pub(super) fn dedup_points(raw: Vec<Vec3>) -> Vec<Vec3> {
+    let size = raw.iter().fold(0.0f64, |m, p| m.max(p.x.abs()).max(p.y.abs()).max(p.z.abs()));
+    let tol = 1e-9 + 1e-14 * size;
     let cell = |v: f64| (v / tol).floor() as i64;
-    let mut grid: HashMap<(i64, i64), Vec<Vec2>> = HashMap::new();
+    let mut grid: HashMap<(i64, i64, i64), Vec<Vec3>> = HashMap::new();
     let mut out = Vec::new();
     for p in raw {
-        let (cx, cy) = (cell(p.x), cell(p.y));
-        let seen = (-1..=1).any(|dx| {
-            (-1..=1).any(|dy| grid.get(&(cx.saturating_add(dx), cy.saturating_add(dy))).is_some_and(|v| v.iter().any(|q| q.dist(p) <= tol)))
+        let c = (cell(p.x), cell(p.y), cell(p.z));
+        let seen = (-1..=1).any(|dx: i64| {
+            (-1..=1).any(|dy: i64| {
+                (-1..=1).any(|dz: i64| {
+                    grid.get(&(c.0.saturating_add(dx), c.1.saturating_add(dy), c.2.saturating_add(dz)))
+                        .is_some_and(|v| v.iter().any(|q| (*q - p).len() <= tol))
+                })
+            })
         });
         if !seen {
-            grid.entry((cx, cy)).or_default().push(p);
+            grid.entry(c).or_default().push(p);
             out.push(p);
         }
     }

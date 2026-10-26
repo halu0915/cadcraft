@@ -909,9 +909,14 @@ fn attached_attributes_join_the_block_z_bounds() {
 /// Repeated crossings collapse to one each, in first-seen order, and many distinct ones stay.
 #[test]
 fn intersection_points_are_deduplicated_in_order() {
-    let pts = vec![Vec2::new(1.0, 0.0), Vec2::new(0.0, 0.0), Vec2::new(1.0, 1e-12), Vec2::new(0.0, 1e-13)];
-    assert_eq!(super::activex::dedup_points(pts), vec![Vec2::new(1.0, 0.0), Vec2::new(0.0, 0.0)]);
-    let many: Vec<Vec2> = (0..200_000).map(|i| Vec2::new(0.0, i as f64)).collect();
+    let pts = vec![Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 1e-12, 0.0), Vec3::new(0.0, 1e-13, 0.0)];
+    assert_eq!(super::activex::dedup_points(pts), vec![Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0)]);
+    // Far from the origin, crossings half a unit apart stay two (Codex round 12).
+    let far = vec![Vec3::new(1e9, 0.0, 0.0), Vec3::new(1e9, 0.5, 0.0), Vec3::new(1e9, 1e-7, 0.0)];
+    assert_eq!(super::activex::dedup_points(far), vec![Vec3::new(1e9, 0.0, 0.0), Vec3::new(1e9, 0.5, 0.0)]);
+    // The same plan point at two heights is two points.
+    assert_eq!(super::activex::dedup_points(vec![Vec3::new(5.0, 0.0, 0.0), Vec3::new(5.0, 0.0, 10.0)]).len(), 2);
+    let many: Vec<Vec3> = (0..200_000).map(|i| Vec3::new(0.0, i as f64, 0.0)).collect();
     let start = std::time::Instant::now();
     assert_eq!(super::activex::dedup_points(many).len(), 200_000);
     assert!(start.elapsed().as_secs() < 10, "took {:?}", start.elapsed());
@@ -1001,4 +1006,16 @@ fn one_sided_intersections_far_from_the_origin() {
         near(&mut s, &format!("(- (car {code}) {x0:.1})"), 5.0);
         near(&mut s, &format!("(cadr {code})"), 0.0);
     }
+}
+
+/// A 3D polyline that runs back over itself in plan at another height: a line crossing the upper
+/// run is found there, at its height (Codex round 12).
+#[test]
+fn intersections_use_the_crossing_segments_height() {
+    let mut s = session();
+    let pts = vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 10.0), Vec3::new(0.0, 0.0, 10.0)];
+    let p = add(&mut s, EntityKind::Polyline3d(cadcraft_doc::Polyline3d { points: pts, closed: false }));
+    let l = add(&mut s, EntityKind::Line(Line { a: Vec3::new(5.0, -5.0, 10.0), b: Vec3::new(5.0, 5.0, 10.0) }));
+    let v = ok(&mut s, &format!("(vlax-invoke (vlax-ename->vla-object {p}) 'IntersectWith (vlax-ename->vla-object {l}) acExtendNone)"));
+    assert_eq!(v, "(5.0 0.0 10.0)");
 }
