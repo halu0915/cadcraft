@@ -569,15 +569,61 @@ fn move_and_bounding_box_in_z() {
     assert_eq!(ok(&mut s, &format!("(vlax-curve-getStartPoint {c})")), "(1.0 0.0 3.0)");
 }
 
-/// A chain of arrays holding lists holding arrays, a hundred thousand deep, drops without
-/// overflowing the stack.
+/// A variant safearray can't hold a safearray, even inside a list: an array holding itself would
+/// be a reference cycle never freed.
+#[test]
+fn a_safearray_cannot_hold_a_safearray() {
+    let mut s = session();
+    ok(&mut s, "(setq a (vlax-make-safearray vlax-vbVariant '(0 . 1)))");
+    for v in ["a", "(list a)", "(list 1 (list 2 a))", "(cons 1 a)"] {
+        let e = eval(&mut s, &format!("(vlax-safearray-put-element a 0 {v})")).unwrap_err();
+        assert!(e.contains("can't hold a safearray"), "{v}: {e}");
+    }
+    assert!(eval(&mut s, "(vlax-safearray-fill a (list (list a)))").is_err());
+    assert_eq!(ok(&mut s, "(vlax-safearray-put-element a 1 '(1 (2 \"x\")))"), "(1 (2 \"x\"))");
+}
+
+/// A chain of arrays holding lists holding arrays, a hundred thousand deep (made directly: LISP
+/// can't nest them), drops without overflowing the stack.
 #[test]
 fn a_deep_chain_of_safearrays_drops() {
     let _heavy = super::value::HEAVY_CELLS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut v = Value::Nil;
+    for _ in 0..100_000 {
+        v = super::value::SafeArray::value(12, 0, vec![Value::list(vec![v])]);
+    }
+    drop(v);
+}
+
+/// Upper bounds near the end of the integer range come out exactly.
+#[test]
+fn safearray_bounds_at_the_integer_limit() {
     let mut s = session();
-    let code = "(setq a nil) (repeat 100000 (setq x (vlax-make-safearray vlax-vbVariant '(0 . 0))) \
-                (vlax-safearray-put-element x 0 (list a)) (setq a x)) (setq a nil x nil) 'done";
-    assert_eq!(ok(&mut s, code), "DONE");
+    ok(&mut s, "(setq b (vlax-make-safearray vlax-vbDouble '(2147483647 . 2147483647)))");
+    assert_eq!(ok(&mut s, "(list (vlax-safearray-get-l-bound b 1) (vlax-safearray-get-u-bound b 1))"), "(2147483647 2147483647)");
+}
+
+/// A block reference's box spans its contents' heights, lifted and scaled to where it is.
+#[test]
+fn a_block_references_box_includes_its_contents_z() {
+    let mut s = session();
+    ok(&mut s, r#"(entmake '((0 . "BLOCK") (2 . "ZB") (70 . 0) (10 0.0 0.0 1.0)))"#);
+    ok(&mut s, r#"(entmake '((0 . "LINE") (10 0.0 0.0 2.0) (11 1.0 0.0 5.0)))"#);
+    ok(&mut s, r#"(entmake '((0 . "ENDBLK")))"#);
+    ok(&mut s, r#"(entmake '((0 . "INSERT") (2 . "ZB") (10 0.0 0.0 10.0) (43 . 2.0)))"#);
+    ok(&mut s, "(vla-GetBoundingBox (vlax-ename->vla-object (entlast)) 'mn 'mx)");
+    // Base z 1, scale 2, at z 10: 10 + 2(2-1) = 12 and 10 + 2(5-1) = 18.
+    assert_eq!(ok(&mut s, "(list (caddr (vlax-safearray->list mn)) (caddr (vlax-safearray->list mx)))"), "(12.0 18.0)");
+}
+
+/// A 3D polyline's area is measured in its own plane: a 10 x 10 square standing in XZ.
+#[test]
+fn a_3d_polylines_area_is_in_its_plane() {
+    let mut s = session();
+    let pts = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 0.0, 10.0], [0.0, 0.0, 10.0]].map(|p| Vec3::new(p[0], p[1], p[2]));
+    let e = add(&mut s, EntityKind::Polyline3d(cadcraft_doc::Polyline3d { points: pts.to_vec(), closed: true }));
+    near(&mut s, &format!("(vlax-curve-getArea {e})"), 100.0);
+    near(&mut s, &format!("(vlax-curve-getDistAtParam {e} 4)"), 40.0);
 }
 
 /// Large safearrays a routine keeps count against its memory budget: it stops with an error

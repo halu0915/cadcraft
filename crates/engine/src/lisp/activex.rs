@@ -765,7 +765,7 @@ fn invoke(ctx: &mut Ctx<'_>, o: &Vla, m: &str, args: &[Value], as_lists: bool) -
             if b.is_empty() || !b.min.is_finite() || !b.max.is_finite() {
                 return Err(automation("Null extents"));
             }
-            let (z0, z1) = z_range(&e);
+            let (z0, z1) = z_range(d, &e, 0);
             ctx.env.set(lo, out(point_sa(Vec3::new(b.min.x, b.min.y, z0))));
             ctx.env.set(hi, out(point_sa(Vec3::new(b.max.x, b.max.y, z1))));
             Ok(Value::Nil)
@@ -920,15 +920,27 @@ fn z_at(e: &Entity, p: Vec2) -> f64 {
     }
 }
 
-/// The lowest and highest z of an entity's geometry (bounding boxes are measured in plan).
-fn z_range(e: &Entity) -> (f64, f64) {
+/// The lowest and highest z of an entity's geometry (bounding boxes are measured in plan). A
+/// block reference spans its contents' z, scaled and lifted to where it is inserted; nesting is
+/// followed to [`cadcraft_doc::MAX_BLOCK_DEPTH`].
+fn z_range(d: &Drawing, e: &Entity, depth: usize) -> (f64, f64) {
     let span = |zs: &mut dyn Iterator<Item = f64>| zs.fold(None, |r: Option<(f64, f64)>, z| Some(r.map_or((z, z), |(a, b)| (a.min(z), b.max(z)))));
     let r = match &e.kind {
         EntityKind::Line(l) => span(&mut [l.a.z, l.b.z].into_iter()),
         EntityKind::Polyline3d(p) => span(&mut p.points.iter().map(|q| q.z)),
+        EntityKind::Insert(i) if depth < cadcraft_doc::MAX_BLOCK_DEPTH => d.block(&i.block).and_then(|b| {
+            let inner = b
+                .entities
+                .iter()
+                .map(|c| z_range(d, c, depth + 1))
+                .fold(None, |r: Option<(f64, f64)>, (lo, hi)| Some(r.map_or((lo, hi), |(a, z)| (a.min(lo), z.max(hi)))))?;
+            let place = |z: f64| i.insert.z + i.scale.z * (z - b.base.z);
+            let (p, q) = (place(inner.0), place(inner.1));
+            Some((p.min(q), p.max(q)))
+        }),
         _ => None,
     };
-    r.unwrap_or_else(|| {
+    r.filter(|(a, b)| a.is_finite() && b.is_finite()).unwrap_or_else(|| {
         let z = entity_z(e);
         (z, z)
     })
@@ -1156,12 +1168,34 @@ fn coerce(vtype: i32, v: &Value) -> Result<Value, LispError> {
             v.clone()
         }
         _ => {
-            if matches!(v, Value::SafeArray(_)) {
-                return Err(LispError::new("a safearray can't hold a safearray here"));
-            }
+            holds_no_safearray(v)?;
             v.clone()
         }
     })
+}
+
+/// A value a variant safearray may hold: one with no safearray anywhere in it. An array holding
+/// itself (through a list) would be a reference cycle never freed; cons cells can't form one on
+/// their own, so this is the only way. The search is bounded.
+fn holds_no_safearray(v: &Value) -> Result<(), LispError> {
+    const MAX_VISIT: usize = 1_000_000;
+    let mut work = vec![v.clone()];
+    let mut seen = 0usize;
+    while let Some(x) = work.pop() {
+        seen += 1;
+        if seen > MAX_VISIT {
+            return Err(LispError::new("too large to store in a safearray"));
+        }
+        match x {
+            Value::SafeArray(_) => return Err(LispError::new("a safearray can't hold a safearray here")),
+            Value::Cons(c) => {
+                work.push(c.car.clone());
+                work.push(c.cdr.clone());
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn safearray(v: &Value) -> Result<&Arc<SafeArray>, LispError> {
@@ -1245,8 +1279,9 @@ fn bound(a: &[Value], upper: bool) -> F {
     if !matches!(a[1], Value::Int(1)) {
         return Err(automation("Invalid dimension"));
     }
-    let len = i32::try_from(sa.to_vec().len()).unwrap_or(i32::MAX);
-    Ok(Flow::Value(Value::Int(if upper { sa.lower.saturating_add(len).saturating_sub(1) } else { sa.lower })))
+    let len = i64::try_from(sa.element_count()).unwrap_or(i64::MAX);
+    let upper_bound = i64::from(sa.lower).saturating_add(len).saturating_sub(1);
+    Ok(Flow::Value(Value::Int(if upper { i32::try_from(upper_bound).unwrap_or(i32::MAX) } else { sa.lower })))
 }
 
 fn vlax_safearray_get_l_bound(_ctx: &mut Ctx<'_>, a: Vec<Value>) -> F {

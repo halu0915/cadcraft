@@ -81,8 +81,9 @@ pub(crate) enum Curve {
     Line { a: Vec3, b: Vec3 },
     /// Parameter: the angle, from `start` to `start + sweep` (a circle: 0 to 2π).
     Arc { center: Vec3, radius: f64, start: f64, sweep: f64, circle: bool },
-    /// Parameter: the vertex number. `vertices` keeps the 2D outline for the area.
-    Poly { pieces: Vec<Piece>, closed: bool, vertices: Vec<PolyVertex> },
+    /// Parameter: the vertex number. `vertices` keeps the 2D outline (with bulges) for the area;
+    /// `points3` a 3D polyline's vertices, whose area is measured in their own plane.
+    Poly { pieces: Vec<Piece>, closed: bool, vertices: Vec<PolyVertex>, points3: Option<Vec<Vec3>> },
 }
 
 /// Parameters within this much (relative) of an end still count as on the curve.
@@ -114,7 +115,7 @@ impl Curve {
                 if n == 0 {
                     return None;
                 }
-                Curve::Poly { pieces, closed: p.closed, vertices: p.vertices.clone() }
+                Curve::Poly { pieces, closed: p.closed, vertices: p.vertices.clone(), points3: None }
             }
             EntityKind::Polyline3d(p) => {
                 let n = p.points.len();
@@ -123,7 +124,12 @@ impl Curve {
                 if n == 0 {
                     return None;
                 }
-                Curve::Poly { pieces, closed: p.closed, vertices: p.points.iter().map(|q| PolyVertex::new(q.xy())).collect() }
+                Curve::Poly {
+                    pieces,
+                    closed: p.closed,
+                    vertices: p.points.iter().map(|q| PolyVertex::new(q.xy())).collect(),
+                    points3: Some(p.points.clone()),
+                }
             }
             _ => return None,
         })
@@ -329,9 +335,27 @@ impl Curve {
                     0.5 * radius * radius * (sweep - sweep.sin())
                 }
             }
+            Curve::Poly { points3: Some(points), .. } => newell_area(points),
             Curve::Poly { vertices, .. } => Polyline { vertices: vertices.clone(), closed: true }.area().abs(),
         }
     }
+}
+
+/// The area of a closed 3D polygon in its own plane (Newell's normal: half the length of the sum
+/// of the edges' cross products; for a polygon that isn't flat, its projection's on the plane that
+/// fits it best).
+fn newell_area(points: &[Vec3]) -> f64 {
+    let Some(o) = points.first().copied() else { return 0.0 };
+    let n = points.len();
+    let (mut x, mut y, mut z) = (0.0, 0.0, 0.0);
+    for i in 0..n {
+        let (Some(p), Some(q)) = (points.get(i), points.get((i + 1) % n)) else { continue };
+        let (p, q) = (sub3(*p, o), sub3(*q, o));
+        x += p.y * q.z - p.z * q.y;
+        y += p.z * q.x - p.x * q.z;
+        z += p.x * q.y - p.y * q.x;
+    }
+    0.5 * (x * x + y * y + z * z).sqrt()
 }
 
 fn sub3(a: Vec3, b: Vec3) -> Vec3 {
