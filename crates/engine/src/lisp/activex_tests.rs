@@ -580,6 +580,9 @@ fn a_safearray_cannot_hold_a_safearray() {
         assert!(e.contains("can't hold a safearray"), "{v}: {e}");
     }
     assert!(eval(&mut s, "(vlax-safearray-fill a (list (list a)))").is_err());
+    // Nor inside a function's body.
+    ok(&mut s, "(setq f (eval (list 'lambda nil (list 'quote a))))");
+    assert!(eval(&mut s, "(vlax-safearray-put-element a 0 f)").unwrap_err().contains("can't hold a safearray"));
     assert_eq!(ok(&mut s, "(vlax-safearray-put-element a 1 '(1 (2 \"x\")))"), "(1 (2 \"x\"))");
 }
 
@@ -730,4 +733,32 @@ fn insertion_point_moves_the_attributes_too() {
         EntityKind::Insert(i) => assert_eq!((i.insert.x, i.insert.y), (20.0, 10.0)),
         other => panic!("{other:?}"),
     }
+}
+
+/// Turning a block reference turns its attributes with it, about the insertion point; a scale
+/// along one axis, which attribute text can't follow, is refused.
+#[test]
+fn rotation_turns_the_attributes_too() {
+    let mut s = session();
+    ok(&mut s, r#"(entmake '((0 . "BLOCK") (2 . "RB") (70 . 2) (10 0.0 0.0 0.0)))"#);
+    ok(&mut s, r#"(entmake '((0 . "ATTDEF") (10 1.0 0.0 0.0) (40 . 1.0) (1 . "v") (2 . "TAG") (3 . "Tag?") (70 . 0)))"#);
+    ok(&mut s, r#"(entmake '((0 . "ENDBLK")))"#);
+    ok(&mut s, r#"(command "_.-insert" "RB" '(10.0 10.0) 1 1 0 "val")"#);
+    let h = s.doc().unwrap().model.last().unwrap().handle;
+    let attrib = |s: &Session| match &s.doc().unwrap().entity(h).unwrap().kind {
+        EntityKind::Insert(i) => i.attribs.first().map(|a| (a.text.insert.x, a.text.insert.y, a.text.rotation)),
+        _ => None,
+    };
+    let (x, y, _) = attrib(&s).expect("the reference has its attribute");
+    let o = format!("(vlax-ename->vla-object (handent \"{}\"))", h.hex());
+    ok(&mut s, &format!("(vla-put-Rotation {o} (/ pi 2))"));
+    let (x2, y2, r2) = attrib(&s).unwrap();
+    // A quarter turn about (10,10): (x, y) -> (10 - (y - 10), 10 + (x - 10)).
+    assert!((x2 - (10.0 - (y - 10.0))).abs() < 1e-9 && (y2 - (10.0 + (x - 10.0))).abs() < 1e-9, "({x},{y}) -> ({x2},{y2})");
+    assert!((r2 - PI / 2.0).abs() < 1e-9);
+    assert!(eval(&mut s, &format!("(vla-put-XScaleFactor {o} 2)")).unwrap_err().contains("not available yet"));
+    // Without attributes a one-axis scale is fine.
+    ok(&mut s, r#"(entmake '((0 . "INSERT") (2 . "RB") (10 0.0 0.0 0.0)))"#);
+    ok(&mut s, "(vla-put-XScaleFactor (vlax-ename->vla-object (entlast)) 2)");
+    assert_eq!(ok(&mut s, "(vla-get-XScaleFactor (vlax-ename->vla-object (entlast)))"), "2.0");
 }

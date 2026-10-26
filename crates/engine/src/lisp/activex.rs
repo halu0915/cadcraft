@@ -643,10 +643,42 @@ fn entity_put(d: &Drawing, e: &Entity, p: &str, v: &Value) -> Result<Entity, Pro
                 let name = string(v)?;
                 i.block = d.block(&name).map(|b| b.name.clone()).ok_or_else(|| automation("Key not found"))?;
             }
-            (EntityKind::Insert(i), "ROTATION") => i.rotation = number(v)?,
-            (EntityKind::Insert(i), "XSCALEFACTOR") => i.scale.x = nonzero(v)?,
-            (EntityKind::Insert(i), "YSCALEFACTOR") => i.scale.y = nonzero(v)?,
-            (EntityKind::Insert(i), "ZSCALEFACTOR") => i.scale.z = nonzero(v)?,
+            (EntityKind::Insert(i), "ROTATION") => {
+                let to = number(v)?;
+                let turn = to - i.rotation;
+                i.rotation = to;
+                // The attached text turns with the reference, around its insertion point (as the
+                // Properties rotation and ROTATE do).
+                let base = i.insert.xy();
+                for a in &mut i.attribs {
+                    let t = &mut a.text;
+                    for q in std::iter::once(&mut t.insert).chain(t.align_pt.as_mut()) {
+                        let r = q.xy().rotate_about(base, turn);
+                        q.x = r.x;
+                        q.y = r.y;
+                    }
+                    t.rotation = cadcraft_geom::norm_angle(t.rotation + turn);
+                    if let Some(ml) = &mut a.multiline {
+                        let r = ml.mtext.insert.xy().rotate_about(base, turn);
+                        ml.mtext.insert.x = r.x;
+                        ml.mtext.insert.y = r.y;
+                        ml.mtext.rotation = cadcraft_geom::norm_angle(ml.mtext.rotation + turn);
+                    }
+                }
+            }
+            (EntityKind::Insert(i), "XSCALEFACTOR" | "YSCALEFACTOR" | "ZSCALEFACTOR") => {
+                // Attribute text can't follow a scale along one axis: refused rather than left
+                // behind.
+                if !i.attribs.is_empty() {
+                    return Err(PropErr::Lisp(LispError::new("scaling a block reference with attributes along one axis is not available yet")));
+                }
+                let k = nonzero(v)?;
+                match p {
+                    "XSCALEFACTOR" => i.scale.x = k,
+                    "YSCALEFACTOR" => i.scale.y = k,
+                    _ => i.scale.z = k,
+                }
+            }
             (EntityKind::Line(l), "STARTPOINT") => l.a = point_arg(v)?,
             (EntityKind::Line(l), "ENDPOINT") => l.b = point_arg(v)?,
             (EntityKind::Circle(k), "CENTER") => k.center = point_arg(v)?,
@@ -1208,6 +1240,8 @@ fn holds_no_safearray(v: &Value) -> Result<(), LispError> {
                 work.push(c.car.clone());
                 work.push(c.cdr.clone());
             }
+            // A function's body can quote an array too.
+            Value::Func(f) => work.push(f.body.clone()),
             _ => {}
         }
     }
