@@ -762,3 +762,66 @@ fn rotation_turns_the_attributes_too() {
     ok(&mut s, "(vla-put-XScaleFactor (vlax-ename->vla-object (entlast)) 2)");
     assert_eq!(ok(&mut s, "(vla-get-XScaleFactor (vlax-ename->vla-object (entlast)))"), "2.0");
 }
+
+/// A polyline of one vertex is that point, at its elevation.
+#[test]
+fn a_single_vertex_polyline_keeps_its_elevation() {
+    let mut s = session();
+    let e = add(
+        &mut s,
+        EntityKind::LwPolyline(LwPolyline {
+            vertices: vec![PolyVertex::new(Vec2::new(2.0, 3.0))],
+            closed: false,
+            const_width: 0.0,
+            elevation: 7.0,
+            plinegen: false,
+        }),
+    );
+    assert_eq!(ok(&mut s, &format!("(vlax-curve-getStartPoint {e})")), "(2.0 3.0 7.0)");
+    near(&mut s, &format!("(vlax-curve-getParamAtPoint {e} '(2 3 7))"), 0.0);
+    let p = add(&mut s, EntityKind::Polyline3d(cadcraft_doc::Polyline3d { points: vec![Vec3::new(1.0, 1.0, 4.0)], closed: false }));
+    assert_eq!(ok(&mut s, &format!("(vlax-curve-getEndPoint {p})")), "(1.0 1.0 4.0)");
+}
+
+/// Moving a block reference along Z, by Move or a new InsertionPoint, lifts a multiline
+/// attribute's text too.
+#[test]
+fn multiline_attributes_move_along_z() {
+    let mut s = session();
+    ok(&mut s, r#"(entmake '((0 . "MTEXT") (10 0.0 0.0 0.0) (40 . 1.0) (1 . "two\\Plines")))"#);
+    let mtext = match &s.doc().unwrap().model.last().unwrap().kind {
+        EntityKind::MText(m) => m.clone(),
+        other => panic!("{other:?}"),
+    };
+    let attrib = cadcraft_doc::Attrib {
+        tag: "T".into(),
+        text: text(),
+        invisible: false,
+        constant: false,
+        prompt: String::new(),
+        props: Default::default(),
+        multiline: Some(cadcraft_doc::MultilineAttrib { mtext, read_as: "two lines".into() }),
+        modes: Default::default(),
+    };
+    let ins = cadcraft_doc::Insert {
+        block: "NONE".into(),
+        insert: Vec3::new(0.0, 0.0, 0.0),
+        scale: Vec3::new(1.0, 1.0, 1.0),
+        rotation: 0.0,
+        attribs: vec![attrib],
+        cols: 1,
+        rows: 1,
+        col_spacing: 0.0,
+        row_spacing: 0.0,
+    };
+    let e = add(&mut s, EntityKind::Insert(ins));
+    let h = s.doc().unwrap().model.last().unwrap().handle;
+    let ml_z = |s: &Session| match &s.doc().unwrap().entity(h).unwrap().kind {
+        EntityKind::Insert(i) => i.attribs.first().and_then(|a| a.multiline.as_ref()).map(|m| m.mtext.insert.z),
+        _ => None,
+    };
+    ok(&mut s, &format!("(vlax-invoke (vlax-ename->vla-object {e}) 'Move '(0 0 0) '(0 0 3))"));
+    assert_eq!(ml_z(&s), Some(3.0));
+    ok(&mut s, &format!("(vla-put-InsertionPoint (vlax-ename->vla-object {e}) (vlax-3d-point 0 0 5))"));
+    assert_eq!(ml_z(&s), Some(5.0), "InsertionPoint at z 5 from z 3 lifts it by 2 more");
+}

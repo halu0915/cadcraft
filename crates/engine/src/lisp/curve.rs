@@ -83,7 +83,9 @@ pub(crate) enum Curve {
     Arc { center: Vec3, radius: f64, start: f64, sweep: f64, circle: bool },
     /// Parameter: the vertex number. `vertices` keeps the 2D outline (with bulges) for the area;
     /// `points3` a 3D polyline's vertices, whose area is measured in their own plane.
-    Poly { pieces: Vec<Piece>, closed: bool, vertices: Vec<PolyVertex>, points3: Option<Vec<Vec3>> },
+    /// `first` is the first vertex in 3D (a lightweight polyline's at its elevation): the whole
+    /// curve when it has one vertex.
+    Poly { pieces: Vec<Piece>, closed: bool, vertices: Vec<PolyVertex>, points3: Option<Vec<Vec3>>, first: Vec3 },
 }
 
 /// Parameters within this much (relative) of an end still count as on the curve.
@@ -112,23 +114,20 @@ impl Curve {
                         None => Piece::Straight(v.p.to3(z), w.p.to3(z)),
                     });
                 }
-                if n == 0 {
-                    return None;
-                }
-                Curve::Poly { pieces, closed: p.closed, vertices: p.vertices.clone(), points3: None }
+                let first = p.vertices.first()?.p.to3(z);
+                Curve::Poly { pieces, closed: p.closed, vertices: p.vertices.clone(), points3: None, first }
             }
             EntityKind::Polyline3d(p) => {
                 let n = p.points.len();
                 let count = if p.closed { n } else { n.saturating_sub(1) };
                 let pieces = (0..count).filter_map(|i| Some(Piece::Straight(*p.points.get(i)?, *p.points.get((i + 1) % n.max(1))?))).collect();
-                if n == 0 {
-                    return None;
-                }
+                let first = *p.points.first()?;
                 Curve::Poly {
                     pieces,
                     closed: p.closed,
                     vertices: p.points.iter().map(|q| PolyVertex::new(q.xy())).collect(),
                     points3: Some(p.points.clone()),
+                    first,
                 }
             }
             _ => return None,
@@ -195,21 +194,12 @@ impl Curve {
                 if l <= f64::EPSILON { *a } else { lerp3(*a, *b, t / l) }
             }
             Curve::Arc { center, radius, .. } => Vec3::new(center.x + radius * t.cos(), center.y + radius * t.sin(), center.z),
-            Curve::Poly { pieces, vertices, .. } => match Self::piece_at(pieces, t) {
+            Curve::Poly { pieces, first, .. } => match Self::piece_at(pieces, t) {
                 Some((p, f)) => p.at(f),
                 // A single vertex: the curve is that point.
-                None => vertices.first().map(|v| v.p.to3(self.z()))?,
+                None => *first,
             },
         })
-    }
-
-    /// The z of a polyline's points (its elevation; a 3D polyline's first point).
-    fn z(&self) -> f64 {
-        match self {
-            Curve::Poly { pieces, .. } => pieces.first().map(|p| p.at(0.0).z).unwrap_or(0.0),
-            Curve::Line { a, .. } => a.z,
-            Curve::Arc { center, .. } => center.z,
-        }
     }
 
     pub(crate) fn dist_at_param(&self, param: f64) -> Option<f64> {
@@ -276,7 +266,7 @@ impl Curve {
                 let param = if *circle { norm_angle(start + d) } else { start + d };
                 (param, Vec3::new(center.x + radius * (start + d).cos(), center.y + radius * (start + d).sin(), center.z))
             }
-            Curve::Poly { pieces, vertices, .. } => {
+            Curve::Poly { pieces, first, .. } => {
                 let mut best: Option<(f64, f64, Vec3)> = None;
                 for (i, piece) in pieces.iter().enumerate() {
                     let (f, q) = piece.closest(p);
@@ -287,7 +277,7 @@ impl Curve {
                 }
                 match best {
                     Some((_, param, q)) => (param, q),
-                    None => (0.0, vertices.first().map(|v| v.p.to3(self.z())).unwrap_or(p)),
+                    None => (0.0, *first),
                 }
             }
         };

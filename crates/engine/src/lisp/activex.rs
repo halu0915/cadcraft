@@ -1015,6 +1015,10 @@ fn shift_z(kind: &mut EntityKind, dz: f64) -> bool {
                 if let Some(p) = a.text.align_pt.as_mut() {
                     p.z += dz;
                 }
+                // A multiline attribute draws and saves from its multiline text.
+                if let Some(ml) = a.multiline.as_mut() {
+                    ml.mtext.insert.z += dz;
+                }
             }
         }
         EntityKind::Text(t) => {
