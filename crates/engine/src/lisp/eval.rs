@@ -66,6 +66,11 @@ pub enum Frame {
         var: Sym,
         body: Value,
     },
+    /// `vlax-for`'s collection was evaluated.
+    VlaxForCollection {
+        var: Sym,
+        body: Value,
+    },
     Foreach {
         var: Sym,
         items: Value,
@@ -111,6 +116,8 @@ pub enum Special {
     Or,
     Defun,
     Lambda,
+    /// `(vlax-for var collection body…)`: `foreach` over an ActiveX collection.
+    VlaxFor,
 }
 
 /// What a built-in asks of the machine.
@@ -356,6 +363,11 @@ impl Machine {
                 let saved = ctx.env.globals.get(&var).cloned();
                 self.foreach(ctx, var, v, body, saved, Value::Nil);
             }
+            Frame::VlaxForCollection { var, body } => {
+                let items = Value::list(super::activex::collection_items(ctx, &v)?);
+                let saved = ctx.env.globals.get(&var).cloned();
+                self.foreach(ctx, var, items, body, saved, Value::Nil);
+            }
             Frame::Foreach { var, items, body, saved } => self.foreach(ctx, var, items, body, saved, v),
             Frame::Unbind { saved } => {
                 restore(ctx.env, saved);
@@ -501,6 +513,11 @@ impl Machine {
                 self.stack.push(Frame::ForeachList { var, body: args.cdr().cdr() });
                 self.state = State::Eval(args.cdr().car());
             }
+            Special::VlaxFor => {
+                let Value::Sym(var) = args.car() else { return Err(LispError::bad_arg("symbolp", &args.car())) };
+                self.stack.push(Frame::VlaxForCollection { var, body: args.cdr().cdr() });
+                self.state = State::Eval(args.cdr().car());
+            }
             Special::Progn => self.progn(args, Value::Nil),
             Special::And => self.and_or(args, true),
             Special::Or => self.and_or(args, false),
@@ -526,6 +543,13 @@ impl Machine {
                 }
                 BuiltinKind::Ctx(func) => {
                     let flow = func(ctx, args)?;
+                    if let Flow::Value(v) = &flow {
+                        super::value::charge_result(v)?;
+                    }
+                    self.flow(flow);
+                }
+                BuiltinKind::Named(func) => {
+                    let flow = func(ctx, b.name, args)?;
                     if let Flow::Value(v) = &flow {
                         super::value::charge_result(v)?;
                     }

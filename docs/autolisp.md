@@ -82,6 +82,7 @@ reached", malformed source is a reader error, and every built-in checks its argu
   getkword entsel nentsel`
 - **Units:** `rtos angtos distof angtof`
 - **No-ops:** `vl-load-com gc redraw`; `ver`
+- **Visual LISP ActiveX:** see [below](#visual-lisp-activex)
 
 Entity lists use the DXF group codes of CADCraft's DXF files: what `entget` returns is what a
 DXF file holds for the object, plus `-1` (its name) and `410` (its layout). Angles (groups 50–58)
@@ -95,6 +96,62 @@ name makes an anonymous block, named when it ends. A BLOCK while a definition is
 xref (flag 4), an invalid name, a block that inserts itself and a block being edited in place
 (REFEDIT) return nil. A definition stays open across routines until ENDBLK, but a routine that
 fails drops the one it began.
+
+## Visual LISP ActiveX
+
+The `vla-` and `vlax-` functions work on CADCraft's own drawing; there is no COM. A `vla-object`
+stands for the application, its document, the Layers and Blocks collections, model space, a
+layer, a block definition or a drawing object (in a space or in a block definition), and every
+read or write goes to the drawing, so it agrees with `entget` and the commands. What can't be
+done fails with an automation error (`Automation Error. Key not found`, `… On locked layer`,
+`ActiveX Server returned the error: unknown name: …`) that `vl-catch-all-apply` catches.
+
+- **Objects:** `vlax-get-acad-object`, `vlax-ename->vla-object`, `vlax-vla-object->ename`,
+  `vlax-for` (Layers, Blocks — model space first —, model space, a block definition), `vla-item`
+  (index or name), `vla-add` (a layer; a block from its base point and name),
+  `vlax-write-enabled-p` (nil on a locked layer), `vlax-read-enabled-p`, `vlax-erased-p`,
+  `vlax-release-object`, `vlax-property-available-p` (with check-modify),
+  `vlax-method-applicable-p`
+- **Properties:** `vla-get-<name>` / `vla-put-<name>`, `vlax-get-property` / `vlax-put-property`
+  and `vlax-get` / `vlax-put` (points as lists). Every object: Layer, Color (0 ByBlock, 256
+  ByLayer), Linetype, Lineweight, LinetypeScale, PlotStyleName, Thickness, Visible, ObjectName,
+  Handle, ObjectID, Application, Document. Block references: Name, EffectiveName (a dynamic
+  block's own name), InsertionPoint, Rotation, X/Y/ZScaleFactor, HasAttributes, IsDynamicBlock.
+  Lines: StartPoint, EndPoint, Length, Angle. Circles and arcs: Center, Radius, Diameter,
+  Circumference, StartAngle, EndAngle, TotalAngle, ArcLength, Area. Polylines: Closed,
+  Elevation, ConstantWidth, Coordinates, Length, Area. Text and MText: TextString, Height,
+  InsertionPoint, Rotation, StyleName. Layers: Name, Lock, LayerOn, Freeze, Plottable, Color,
+  Linetype, Lineweight, Description. Blocks: Name, IsXRef, IsLayout, IsDynamicBlock, Count,
+  Origin, Comments. The application: ActiveDocument, Preferences (Files with SupportPath,
+  Profiles with ActiveProfile: read, never changed), Name, Version; the document: ModelSpace,
+  Layers, Blocks, ActiveLayer, Name, Path, FullName. `:vlax-true` and `:vlax-false` are the
+  booleans.
+- **Methods:** `vla-<method>`, `vlax-invoke` (arrays as lists) and `vlax-invoke-method`:
+  GetBoundingBox (the symbols passed are set, to safearrays or with `vlax-invoke` to lists),
+  Move, Copy, Delete, Update, IntersectWith (`acExtendNone`, `…ThisEntity`, `…OtherEntity`,
+  `…Both`), Item, Add, Regen, StartUndoMark and EndUndoMark (a routine is one undo step already).
+  `vlax-invoke` with a property name reads it (no argument) or writes it (one).
+- **Safearrays and variants:** `vlax-make-safearray` (one dimension), `vlax-safearray->list`,
+  `vlax-safearray-fill`, `vlax-safearray-get-element`, `vlax-safearray-put-element`,
+  `vlax-safearray-get-l-bound`, `vlax-safearray-get-u-bound`, `vlax-safearray-type`,
+  `vlax-3d-point`; values are their own variants (`vlax-make-variant`, `vlax-variant-value`,
+  `vlax-variant-type`, `vlax-variant-change-type`). Constants: `vlax-vbDouble` and the other
+  types, `acExtend…`, `acAllViewports`, `acActiveViewport`, `acByLayer`, `acByBlock`, `acRed`…
+  `acWhite`, `acLnWtByLayer`, `acLnWtByBlock`, `acLnWtByLwDefault`.
+- **Curves:** `vlax-curve-getStartParam getEndParam getStartPoint getEndPoint getPointAtParam
+  getDistAtParam getParamAtDist getPointAtDist getParamAtPoint getDistAtPoint
+  getClosestPointTo getFirstDeriv isClosed getArea`, on an entity name or a `vla-object`, for
+  lines, arcs, circles, lightweight and 3D polylines. Parameters are AutoCAD's: a line's is the
+  distance from its start, an arc's and a circle's the angle in radians (an arc runs from its
+  start angle to start + sweep, so an arc across 0° ends past 2π), a polyline's the vertex
+  number (each segment, straight or bulged, spans one). A point off the curve, or a distance or
+  parameter past its ends, gives nil. An arc's area is the region between it and its chord; an
+  open polyline's is measured as if closed.
+
+Not yet: ellipses and splines in the curve functions, multi-dimensional safearrays, the OCS of
+extruded objects, renaming or deleting layers through ActiveX, the paper space layouts in the
+Blocks collection, reactors (`vlr-…`) and other ActiveX objects (dimension, hatch and table
+properties, `InsertBlock`, `AddLine`…).
 
 ## Testing against the corpus
 

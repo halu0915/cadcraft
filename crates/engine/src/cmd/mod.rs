@@ -19,7 +19,7 @@ mod griphot;
 pub(crate) mod groups;
 pub(crate) mod hatch;
 mod inquiry;
-mod layer;
+pub(crate) mod layer;
 mod layout;
 mod lisp;
 mod mleader_content;

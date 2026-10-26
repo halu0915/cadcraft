@@ -14,10 +14,12 @@ and what is not there yet.
 
 ## LISP routines
 
-Most routines that only draw, edit and query objects run as they are. Not yet supported: Visual
-LISP ActiveX functions (`vlax-…`, `vla-…`), DCL dialogs and reactors ([gaps.md](gaps.md) E1). A
-routine that uses them needs those parts rewritten, for example with `command` calls and `get…`
-prompts instead of a dialog.
+Most routines that only draw, edit and query objects run as they are, including the common
+Visual LISP ActiveX functions (`vlax-ename->vla-object`, `vla-get-…`/`vla-put-…`, `vlax-for`,
+`vlax-curve-…`; [autolisp.md](autolisp.md#visual-lisp-activex)). Not yet supported: DCL dialogs,
+reactors and the rarer ActiveX objects and methods ([gaps.md](gaps.md) E1). A routine that uses
+them needs those parts rewritten, for example with `command` calls and `get…` prompts instead of
+a dialog.
 
 Put routines you want in every session in the support folder (`support` in the settings folder;
 paths in [autolisp.md](autolisp.md#at-startup)) and load them from `acad.lsp` or `acaddoc.lsp`, or

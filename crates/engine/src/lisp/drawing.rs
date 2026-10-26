@@ -181,16 +181,24 @@ fn to_json_bounded(v: &Value, depth: usize, budget: &mut u64) -> Option<serde_js
     })
 }
 
+/// A system variable's name: a string, or a symbol (`(getvar 'cmdecho)`, as AutoLISP takes).
+fn sysvar_name(v: &Value) -> Result<String, LispError> {
+    match v {
+        Value::Sym(s) => Ok(s.name().to_string()),
+        other => string(other),
+    }
+}
+
 pub fn getvar(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
     arity(&a, 1, 1)?;
-    let name = string(&a[0])?;
+    let name = sysvar_name(&a[0])?;
     Ok(Flow::Value(crate::sysvars::get(ctx.s, &name).map(|v| from_json(&v)).unwrap_or_default()))
 }
 
 /// Set a system variable after bounded JSON conversion, reporting invalid or oversized values as LISP errors.
 pub fn setvar(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
     arity(&a, 2, 2)?;
-    let name = string(&a[0])?;
+    let name = sysvar_name(&a[0])?;
     let mut budget: u64 = TO_JSON_BUDGET;
     let Some(json) = to_json_bounded(&a[1], 0, &mut budget) else {
         return Err(LispError::new(format!("AutoCAD variable setting rejected: {} value too large", to_text(&a[0], true))));
@@ -355,6 +363,16 @@ fn entity_from_list(ctx: &Ctx<'_>, list: &Value) -> Result<(String, cadcraft_doc
 }
 
 pub fn entmake(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
+    make(ctx, a, false)
+}
+
+/// `(entmakex list)`: `entmake` answering the new entity's name instead of the list. Block
+/// definition lists (BLOCK, the entities after it, ENDBLK) answer as `entmake` does.
+pub fn entmakex(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
+    make(ctx, a, true)
+}
+
+fn make(ctx: &mut Ctx<'_>, a: Vec<Value>, ename: bool) -> Result<Flow, LispError> {
     arity(&a, 0, 1)?;
     let Some(list) = a.first().filter(|v| !v.is_nil()) else { return Ok(Flow::Value(Value::Nil)) };
     // A block definition is a BLOCK list, its entities, then an ENDBLK list (#1662).
@@ -381,9 +399,9 @@ pub fn entmake(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
     // A layer entmake names that doesn't exist yet is created.
     d.ensure_layer(&common.layer);
     match d.add(&space, common, kind) {
-        Ok(_) => {
+        Ok(h) => {
             ctx.s.touch();
-            Ok(Flow::Value(list.clone()))
+            Ok(Flow::Value(if ename { Value::Ename(h) } else { list.clone() }))
         }
         Err(_) => Ok(Flow::Value(Value::Nil)),
     }
@@ -518,10 +536,13 @@ pub fn entdel(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
     }
 }
 
-/// Every entity's handle in creation order (model space and layouts), cached per drawing.
+/// Every entity's handle in creation order (model space and layouts), cached per drawing. The
+/// cache is keyed on the drawing's address and on what changes when entities come and go (its
+/// revision, next handle and count): a routine changing the drawing in place keeps its address,
+/// and `entlast` after a second `entmake` must not answer the first.
 fn handles_in_order(ctx: &mut Ctx<'_>) -> Arc<Vec<Handle>> {
     let Ok(st) = ctx.s.state() else { return Arc::default() };
-    let key = Arc::as_ptr(&st.doc) as usize;
+    let key = (Arc::as_ptr(&st.doc) as usize, st.revision, st.doc.handseed, st.doc.entity_count());
     if let Some((k, v)) = &ctx.env.order
         && *k == key
     {
@@ -891,7 +912,7 @@ pub fn ssgetfirst(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
 
 // ---------------- symbol tables ----------------
 
-fn color_index(c: cadcraft_color::Color) -> i32 {
+pub(super) fn color_index(c: cadcraft_color::Color) -> i32 {
     match c {
         cadcraft_color::Color::Index(i) => i32::from(i),
         cadcraft_color::Color::ByBlock => 0,

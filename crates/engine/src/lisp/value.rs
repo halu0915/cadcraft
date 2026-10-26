@@ -1,5 +1,6 @@
 //! AutoLISP values: integers (32-bit, wrapping as AutoLISP's do), reals, strings, symbols,
-//! lists built of cons cells, entity names, selection sets, files and functions.
+//! lists built of cons cells, entity names, selection sets, files, functions, and the ActiveX
+//! values of Visual LISP (`vla-object`s and safearrays, see `activex.rs`).
 //!
 //! Values are shared (`Arc`) so a session stays `Send`. Cons cells (and functions) are dropped
 //! iteratively: a list a million long, or nested a million deep, would otherwise overflow the
@@ -185,8 +186,55 @@ pub enum BuiltinKind {
     Pure(fn(&[Value]) -> Result<Value, LispError>),
     /// Evaluated arguments, with the interpreter (and its session) at hand.
     Ctx(fn(&mut super::eval::Ctx<'_>, Vec<Value>) -> Result<super::eval::Flow, LispError>),
+    /// Evaluated arguments, with the interpreter at hand and the built-in's own name (one
+    /// function serves a family of built-ins: `vla-get-<property>`, `vla-<method>`).
+    Named(fn(&mut super::eval::Ctx<'_>, &'static str, Vec<Value>) -> Result<super::eval::Flow, LispError>),
     /// A special form, handled by the evaluator itself.
     Special(super::eval::Special),
+}
+
+/// An ActiveX object (`vla-object`) as Visual LISP sees it: the application and its document,
+/// the drawing's collections, a layer or block definition by name, or a drawing object.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Vla {
+    Application,
+    Document,
+    ModelSpace,
+    Layers,
+    Blocks,
+    Preferences,
+    PreferencesFiles,
+    PreferencesProfiles,
+    Layer(Arc<str>),
+    Block(Arc<str>),
+    /// A drawing object: in model or paper space (`block` is `None`) or in a block definition.
+    /// `iface` is its ActiveX interface name (`IAcadLine`), for printing.
+    Entity {
+        handle: Handle,
+        block: Option<Arc<str>>,
+        iface: &'static str,
+    },
+}
+
+/// A safearray (`vlax-make-safearray`): a one-dimensional array of one element type, indexed
+/// from `lower`. Shared, so `vlax-safearray-put-element` changes it in place.
+#[derive(Debug)]
+pub struct SafeArray {
+    /// The element type (`vlax-vbDouble` 5, `vlax-vbString` 8…).
+    pub vtype: i32,
+    pub lower: i32,
+    pub items: Mutex<Vec<Value>>,
+}
+
+impl SafeArray {
+    /// A new safearray, as a value.
+    pub fn value(vtype: i32, lower: i32, items: Vec<Value>) -> Value {
+        Value::SafeArray(Arc::new(SafeArray { vtype, lower, items: Mutex::new(items) }))
+    }
+    /// A copy of the elements.
+    pub fn to_vec(&self) -> Vec<Value> {
+        self.items.lock().map(|v| v.clone()).unwrap_or_default()
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -203,6 +251,8 @@ pub enum Value {
     File(u32),
     Subr(&'static Builtin),
     Func(Arc<Func>),
+    Vla(Vla),
+    SafeArray(Arc<SafeArray>),
 }
 
 impl Value {
@@ -294,6 +344,8 @@ impl Value {
             Value::File(_) => "FILE",
             Value::Subr(_) => "SUBR",
             Value::Func(_) => "USUBR",
+            Value::Vla(_) => "VLA-OBJECT",
+            Value::SafeArray(_) => "SAFEARRAY",
         })
     }
     /// A 2D or 3D point given as a list of two or three numbers.
@@ -337,6 +389,7 @@ pub fn eq(a: &Value, b: &Value) -> bool {
         (Value::PickSet(x), Value::PickSet(y)) => x.id == y.id,
         (Value::Func(x), Value::Func(y)) => Arc::ptr_eq(x, y),
         (Value::Subr(x), Value::Subr(y)) => std::ptr::eq(*x, *y),
+        (Value::SafeArray(x), Value::SafeArray(y)) => Arc::ptr_eq(x, y),
         _ => atom_equal(a, b, 0.0),
     }
 }
@@ -389,10 +442,23 @@ fn atom_equal(a: &Value, b: &Value, fuzz: f64) -> bool {
         (Value::PickSet(x), Value::PickSet(y)) => x.id == y.id,
         (Value::Subr(x), Value::Subr(y)) => std::ptr::eq(*x, *y),
         (Value::Func(x), Value::Func(y)) => Arc::ptr_eq(x, y),
+        (Value::Vla(x), Value::Vla(y)) => vla_same(x, y),
+        (Value::SafeArray(x), Value::SafeArray(y)) => Arc::ptr_eq(x, y),
         (x, y) => match (x.as_number(), y.as_number()) {
             (Some(p), Some(q)) if matches!(x, Value::Real(_)) || matches!(y, Value::Real(_)) || fuzz > 0.0 => (p - q).abs() <= fuzz,
             _ => false,
         },
+    }
+}
+
+/// The same ActiveX object (block names compare case-insensitively).
+fn vla_same(a: &Vla, b: &Vla) -> bool {
+    match (a, b) {
+        (Vla::Layer(x), Vla::Layer(y)) | (Vla::Block(x), Vla::Block(y)) => x.eq_ignore_ascii_case(y),
+        (Vla::Entity { handle: h, block: x, .. }, Vla::Entity { handle: k, block: y, .. }) => {
+            h == k && x.as_deref().map(str::to_ascii_uppercase) == y.as_deref().map(str::to_ascii_uppercase)
+        }
+        _ => a == b,
     }
 }
 
@@ -533,6 +599,25 @@ fn write_value(out: &mut String, v: &Value, escape: bool, depth: usize) {
         Value::File(f) => out.push_str(&format!("#<FILE {f:x}>")),
         Value::Subr(b) => out.push_str(&format!("#<SUBR @{} {}>", "0", b.name)),
         Value::Func(f) => out.push_str(&format!("#<USUBR {}>", f.name.as_ref().map_or("-lambda-", |s| s.name()))),
+        Value::Vla(o) => out.push_str(&format!("#<VLA-OBJECT {}>", vla_text(o))),
+        Value::SafeArray(_) => out.push_str("#<safearray...>"),
+    }
+}
+
+/// What a `vla-object` prints after `#<VLA-OBJECT`: its interface and an identity.
+fn vla_text(o: &Vla) -> String {
+    match o {
+        Vla::Application => "IAcadApplication 0000000000000001".into(),
+        Vla::Document => "IAcadDocument 0000000000000002".into(),
+        Vla::ModelSpace => "IAcadModelSpace 0000000000000003".into(),
+        Vla::Layers => "IAcadLayers 0000000000000004".into(),
+        Vla::Blocks => "IAcadBlocks 0000000000000005".into(),
+        Vla::Preferences => "IAcadPreferences 0000000000000006".into(),
+        Vla::PreferencesFiles => "IAcadPreferencesFiles 0000000000000007".into(),
+        Vla::PreferencesProfiles => "IAcadPreferencesProfiles 0000000000000008".into(),
+        Vla::Layer(n) => format!("IAcadLayer {n}"),
+        Vla::Block(n) => format!("IAcadBlock {n}"),
+        Vla::Entity { handle, iface, .. } => format!("{iface} {:016x}", handle.0),
     }
 }
 

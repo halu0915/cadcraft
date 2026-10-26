@@ -1538,6 +1538,7 @@ static BUILTINS: &[Builtin] = &[
     ctx!("SETVAR", drawing::setvar),
     ctx!("ENTGET", drawing::entget),
     ctx!("ENTMAKE", drawing::entmake),
+    ctx!("ENTMAKEX", drawing::entmakex),
     ctx!("ENTMOD", drawing::entmod),
     ctx!("ENTDEL", drawing::entdel),
     ctx!("ENTLAST", drawing::entlast),
@@ -1566,6 +1567,7 @@ pub fn install(env: &mut Env) {
     for b in BUILTINS {
         env.globals.insert(Sym::new(b.name), Value::Subr(b));
     }
+    super::activex::install(env);
     env.globals.insert(Sym::new("T"), Value::t());
     env.globals.insert(Sym::new("PI"), Value::Real(std::f64::consts::PI));
     env.globals.insert(Sym::new("PAUSE"), Value::str("\\"));
