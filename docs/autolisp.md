@@ -129,7 +129,10 @@ done fails with an automation error (`Automation Error. Key not found`, `… On 
 - **Methods:** `vla-<method>`, `vlax-invoke` (arrays as lists) and `vlax-invoke-method`:
   GetBoundingBox (the symbols passed are set, to safearrays or with `vlax-invoke` to lists),
   Move, Copy, Delete, Update, IntersectWith (`acExtendNone`, `…ThisEntity`, `…OtherEntity`,
-  `…Both`), Item, Add, Regen, StartUndoMark and EndUndoMark (a routine is one undo step already).
+  `…Both`; crossings in plan count only where both objects are at the same height), Item, Add,
+  Regen, StartUndoMark and EndUndoMark (a routine is one undo step already).
+  An object found in a block definition converts to an entity name and back, and `entget` reads
+  that name (without a 410 layout group).
   `vlax-invoke` with a property name reads it (no argument) or writes it (one).
 - **Safearrays and variants:** `vlax-make-safearray` (one dimension), `vlax-safearray->list`,
   `vlax-safearray-fill`, `vlax-safearray-get-element`, `vlax-safearray-put-element`,

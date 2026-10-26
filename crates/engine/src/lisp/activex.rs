@@ -834,12 +834,18 @@ fn invoke(ctx: &mut Ctx<'_>, o: &Vla, m: &str, args: &[Value], as_lists: bool) -
             let d = doc(ctx)?;
             let a = entity_of(d, o).ok_or_else(|| automation("Object was erased"))?;
             let b = entity_of(d, other).ok_or_else(|| automation("Object was erased"))?;
-            let z = entity_z(&a);
-            let pts = intersections(&a, &b, mode);
+            // Crossings in plan that are also at the same height on both objects.
+            let pts: Vec<Vec3> = intersections(&a, &b, mode)
+                .into_iter()
+                .filter_map(|p| {
+                    let (za, zb) = (z_at(&a, p), z_at(&b, p));
+                    ((za - zb).abs() <= 1e-9 * (1.0 + za.abs().max(zb.abs()))).then(|| Vec3::new(p.x, p.y, za))
+                })
+                .collect();
             if pts.is_empty() && as_lists {
                 return Ok(Value::Nil);
             }
-            Ok(out(doubles_sa(pts.iter().flat_map(|p| [p.x, p.y, z]))))
+            Ok(out(doubles_sa(pts.iter().flat_map(|p| [p.x, p.y, p.z]))))
         }
         (Vla::Layers | Vla::Blocks | Vla::ModelSpace | Vla::Block(_), "ITEM") => {
             arity(args, 1, 1)?;
@@ -887,6 +893,30 @@ fn invoke(ctx: &mut Ctx<'_>, o: &Vla, m: &str, args: &[Value], as_lists: bool) -
                 _ => Err(unknown_name(m)),
             }
         }
+    }
+}
+
+/// The z of an entity at plan point `p` on it: along a sloped line or 3D polyline segment, the
+/// height there; any other object is flat at its elevation.
+fn z_at(e: &Entity, p: Vec2) -> f64 {
+    let on_line = |a: Vec3, b: Vec3| {
+        let d = b.xy() - a.xy();
+        let l2 = d.x * d.x + d.y * d.y;
+        let t = if l2 <= f64::EPSILON { 0.0 } else { ((p.x - a.x) * d.x + (p.y - a.y) * d.y) / l2 };
+        a.z + (b.z - a.z) * t
+    };
+    match &e.kind {
+        EntityKind::Line(l) => on_line(l.a, l.b),
+        EntityKind::Polyline3d(pl) => {
+            let n = pl.points.len();
+            let count = if pl.closed { n } else { n.saturating_sub(1) };
+            (0..count)
+                .filter_map(|i| Some((*pl.points.get(i)?, *pl.points.get((i + 1) % n.max(1))?)))
+                .map(|(a, b)| (cadcraft_geom::Line::new(a.xy(), b.xy()).closest(p).dist(p), on_line(a, b)))
+                .fold(None, |best: Option<(f64, f64)>, c| if best.is_none_or(|b| c.0 < b.0) { Some(c) } else { best })
+                .map_or_else(|| entity_z(e), |(_, z)| z)
+        }
+        _ => entity_z(e),
     }
 }
 
@@ -1031,8 +1061,17 @@ fn vlax_ename_to_vla_object(ctx: &mut Ctx<'_>, a: Vec<Value>) -> F {
     arity(&a, 1, 1)?;
     let Value::Ename(h) = &a[0] else { return Err(LispError::bad_arg("lentityp", &a[0])) };
     let d = doc(ctx)?;
-    let e = d.entity(*h).ok_or_else(|| LispError::bad_arg("lentityp", &a[0]))?;
-    Ok(Flow::Value(entity_value(e, None)))
+    let (e, block) = find_entity(d, *h).ok_or_else(|| LispError::bad_arg("lentityp", &a[0]))?;
+    Ok(Flow::Value(entity_value(&e, block.as_deref())))
+}
+
+/// The entity with handle `h`: in model space or a layout (`None` block), or in a block
+/// definition (handles are unique across the drawing).
+pub(crate) fn find_entity(d: &Drawing, h: Handle) -> Option<(Arc<Entity>, Option<String>)> {
+    if let Some(e) = d.entity(h) {
+        return Some((e.clone(), None));
+    }
+    d.blocks.values().find_map(|b| b.entities.get(h).map(|e| (e.clone(), Some(b.name.clone()))))
 }
 
 fn vlax_vla_object_to_ename(_ctx: &mut Ctx<'_>, a: Vec<Value>) -> F {
@@ -1106,7 +1145,11 @@ fn coerce(vtype: i32, v: &Value) -> Result<Value, LispError> {
             other => return Err(LispError::bad_arg("numberp", other)),
         },
         VB_SINGLE | VB_DOUBLE => Value::Real(number(v)?),
-        VB_STRING => Value::str(&string(v)?),
+        // The string itself is shared, not copied (a copy would escape the memory budget).
+        VB_STRING => {
+            string(v)?;
+            v.clone()
+        }
         VB_BOOLEAN => vbool(truthy(v)),
         VB_OBJECT => {
             obj(v)?;

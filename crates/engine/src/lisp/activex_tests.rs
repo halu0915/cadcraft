@@ -590,3 +590,52 @@ fn safearrays_count_against_the_memory_budget() {
     let e = eval(&mut s, code).unwrap_err();
     assert!(e.contains("out of memory"), "{e}");
 }
+
+/// An object found in a block definition converts to an entity name and back, and `entget` and
+/// the curve functions read that name.
+#[test]
+fn block_definition_objects_round_trip_through_entity_names() {
+    let mut s = session();
+    ok(&mut s, r#"(entmake '((0 . "BLOCK") (2 . "RT") (70 . 0) (10 0.0 0.0 0.0)))"#);
+    ok(&mut s, r#"(entmake '((0 . "LINE") (8 . "0") (10 0.0 0.0 0.0) (11 3.0 4.0 0.0)))"#);
+    ok(&mut s, r#"(entmake '((0 . "ENDBLK")))"#);
+    ok(
+        &mut s,
+        "(vlax-for x (vla-item (vla-get-Blocks (vla-get-ActiveDocument (vlax-get-acad-object))) \"RT\") (setq o x en (vlax-vla-object->ename x)))",
+    );
+    assert_eq!(ok(&mut s, "(equal o (vlax-ename->vla-object en))"), "T", "the object keeps its block");
+    assert_eq!(ok(&mut s, "(cdr (assoc 0 (entget en)))"), "\"LINE\"");
+    assert_eq!(ok(&mut s, "(assoc 410 (entget en))"), "nil", "a block's object has no layout");
+    assert_eq!(ok(&mut s, "(cdr (assoc 11 (entget en)))"), "(3.0 4.0 0.0)");
+    assert_eq!(ok(&mut s, "(vlax-curve-getEndParam en)"), "5.0");
+    ok(&mut s, "(vla-put-Color (vlax-ename->vla-object en) 3)");
+    assert_eq!(ok(&mut s, "(cdr (assoc 62 (entget en)))"), "3");
+}
+
+/// Lines crossing in plan but at different heights don't intersect; a sloped line meets a flat
+/// one at the height where it crosses.
+#[test]
+fn intersections_are_checked_in_z() {
+    let mut s = session();
+    let flat = add(&mut s, EntityKind::Line(Line { a: Vec3::new(0.0, 10.0, 5.0), b: Vec3::new(10.0, 0.0, 5.0) }));
+    let high = add(&mut s, EntityKind::Line(Line { a: Vec3::new(0.0, 0.0, 10.0), b: Vec3::new(10.0, 10.0, 10.0) }));
+    let slope = add(&mut s, EntityKind::Line(Line { a: Vec3::new(0.0, 0.0, 0.0), b: Vec3::new(10.0, 10.0, 10.0) }));
+    ok(&mut s, &format!("(setq f (vlax-ename->vla-object {flat}) h (vlax-ename->vla-object {high}) sl (vlax-ename->vla-object {slope}))"));
+    assert_eq!(ok(&mut s, "(vlax-invoke f 'IntersectWith h acExtendNone)"), "nil");
+    assert_eq!(ok(&mut s, "(vlax-invoke f 'IntersectWith sl acExtendNone)"), "(5.0 5.0 5.0)");
+    assert_eq!(ok(&mut s, "(vlax-invoke sl 'IntersectWith f acExtendNone)"), "(5.0 5.0 5.0)");
+}
+
+/// Filling a string safearray shares the strings given (copies would escape the memory budget).
+#[test]
+fn string_safearrays_share_their_strings() {
+    let mut s = session();
+    ok(&mut s, "(setq str (strcat \"abc\" \"def\") sa (vlax-make-safearray vlax-vbString '(0 . 2)))");
+    ok(&mut s, "(vlax-safearray-fill sa (list str str))");
+    ok(&mut s, "(vlax-safearray-put-element sa 2 str)");
+    let (Value::Str(want), Value::SafeArray(sa)) = (s.lisp_var("STR"), s.lisp_var("SA")) else { panic!("not set") };
+    for v in sa.to_vec() {
+        let Value::Str(have) = v else { panic!("not a string") };
+        assert!(std::sync::Arc::ptr_eq(&have, &want));
+    }
+}

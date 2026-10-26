@@ -326,12 +326,15 @@ pub fn entget(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
     arity(&a, 1, 2)?;
     let h = ename(&a[0])?;
     let Ok(d) = ctx.s.doc() else { return Ok(Flow::Value(Value::Nil)) };
-    let Some(e) = d.entity(h) else { return Ok(Flow::Value(Value::Nil)) };
-    let (kind, mut tags) = (codec()?.groups)(d, e);
+    // An entity in a space, or in a block definition (an object `vlax-for` found there): it has
+    // no layout.
+    let Some((e, block)) = super::activex::find_entity(d, h) else { return Ok(Flow::Value(Value::Nil)) };
+    let (kind, mut tags) = (codec()?.groups)(d, &e);
     convert_angles(&kind, &mut tags, f64::to_radians);
     let layout = match space_of(d, h) {
-        Some(Space::Paper(name)) => name,
-        _ => "Model".into(),
+        _ if block.is_some() => None,
+        Some(Space::Paper(name)) => Some(name),
+        _ => Some("Model".into()),
     };
     let mut items = vec![Value::cons(Value::Int(-1), Value::Ename(h)), Value::cons(Value::Int(0), Value::str(&kind))];
     let mut placed_layout = false;
@@ -339,8 +342,8 @@ pub fn entget(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
         // The layout name follows the AcDbEntity marker, as AutoCAD lists it.
         let after_marker = !placed_layout && v.car().as_number() == Some(100.0) && matches!(v.cdr(), Value::Str(ref s) if &**s == "AcDbEntity");
         items.push(v);
-        if after_marker {
-            items.push(Value::cons(Value::Int(410), Value::str(&layout)));
+        if after_marker && let Some(layout) = &layout {
+            items.push(Value::cons(Value::Int(410), Value::str(layout)));
             placed_layout = true;
         }
     }

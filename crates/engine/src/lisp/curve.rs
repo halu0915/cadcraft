@@ -367,7 +367,7 @@ fn arity(a: &[Value], min: usize, max: usize) -> Result<(), LispError> {
 fn entity_arg(ctx: &Ctx<'_>, v: &Value) -> Result<Arc<Entity>, LispError> {
     let d = ctx.s.doc().map_err(|e| LispError::new(e.to_string()))?;
     let found = match v {
-        Value::Ename(h) => d.entity(*h).cloned(),
+        Value::Ename(h) => activex::find_entity(d, *h).map(|(e, _)| e),
         Value::Vla(o) => activex::entity_of(d, o),
         _ => None,
     };
