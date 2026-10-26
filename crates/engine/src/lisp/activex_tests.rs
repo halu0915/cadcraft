@@ -865,3 +865,54 @@ fn nested_shared_blocks_bound_quickly() {
     near(&mut s, "(caddr (vlax-safearray->list lo))", 5.0);
     near(&mut s, "(caddr (vlax-safearray->list hi))", 7.0);
 }
+
+/// An attribute above the block's geometry raises the reference's box top.
+#[test]
+fn attached_attributes_join_the_block_z_bounds() {
+    let mut s = session();
+    ok(
+        &mut s,
+        r#"(progn
+  (entmake '((0 . "BLOCK") (2 . "ZB") (70 . 0) (10 0.0 0.0 0.0)))
+  (entmake '((0 . "LINE") (8 . "0") (10 0.0 0.0 0.0) (11 10.0 0.0 0.0)))
+  (entmake '((0 . "ENDBLK"))))"#,
+    );
+    let mut t = text();
+    t.insert = Vec3::new(1.0, 1.0, 10.0);
+    let attrib = cadcraft_doc::Attrib {
+        tag: "T".into(),
+        text: t,
+        invisible: false,
+        constant: false,
+        prompt: String::new(),
+        props: Default::default(),
+        multiline: None,
+        modes: Default::default(),
+    };
+    let ins = cadcraft_doc::Insert {
+        block: "ZB".into(),
+        insert: Vec3::new(0.0, 0.0, 0.0),
+        scale: Vec3::new(1.0, 1.0, 1.0),
+        rotation: 0.0,
+        attribs: vec![attrib],
+        cols: 1,
+        rows: 1,
+        col_spacing: 0.0,
+        row_spacing: 0.0,
+    };
+    let e = add(&mut s, EntityKind::Insert(ins));
+    ok(&mut s, &format!("(vla-GetBoundingBox (vlax-ename->vla-object {e}) 'lo 'hi)"));
+    near(&mut s, "(caddr (vlax-safearray->list lo))", 0.0);
+    near(&mut s, "(caddr (vlax-safearray->list hi))", 10.0);
+}
+
+/// Repeated crossings collapse to one each, in first-seen order, and many distinct ones stay.
+#[test]
+fn intersection_points_are_deduplicated_in_order() {
+    let pts = vec![Vec2::new(1.0, 0.0), Vec2::new(0.0, 0.0), Vec2::new(1.0, 1e-12), Vec2::new(0.0, 1e-13)];
+    assert_eq!(super::activex::dedup_points(pts), vec![Vec2::new(1.0, 0.0), Vec2::new(0.0, 0.0)]);
+    let many: Vec<Vec2> = (0..200_000).map(|i| Vec2::new(0.0, i as f64)).collect();
+    let start = std::time::Instant::now();
+    assert_eq!(super::activex::dedup_points(many).len(), 200_000);
+    assert!(start.elapsed().as_secs() < 10, "took {:?}", start.elapsed());
+}

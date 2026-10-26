@@ -987,24 +987,33 @@ fn z_range_cached(d: &Drawing, e: &Entity, depth: usize, cache: &mut ZCache) -> 
         EntityKind::Polyline3d(p) => span(&mut p.points.iter().map(|q| q.z)),
         EntityKind::Solid(s) | EntityKind::Trace(s) => span(&mut s.corners.iter().map(|q| q.z)),
         EntityKind::Face3d(f) => span(&mut f.corners.iter().map(|q| q.z)),
-        EntityKind::Insert(i) if depth < cadcraft_doc::MAX_BLOCK_DEPTH => d.block(&i.block).and_then(|b| {
-            let key = (i.block.clone(), depth);
-            let inner = match cache.get(&key) {
-                Some(r) => *r,
-                None => {
-                    let r = b
-                        .entities
-                        .iter()
-                        .map(|c| z_range_cached(d, c, depth + 1, cache))
-                        .fold(None, |r: Option<(f64, f64)>, (lo, hi)| Some(r.map_or((lo, hi), |(a, z)| (a.min(lo), z.max(hi)))));
-                    cache.insert(key, r);
-                    r
-                }
-            }?;
-            let place = |z: f64| i.insert.z + i.scale.z * (z - b.base.z);
-            let (p, q) = (place(inner.0), place(inner.1));
-            Some((p.min(q), p.max(q)))
-        }),
+        EntityKind::Insert(i) if depth < cadcraft_doc::MAX_BLOCK_DEPTH => d
+            .block(&i.block)
+            .and_then(|b| {
+                let key = (i.block.clone(), depth);
+                let inner = match cache.get(&key) {
+                    Some(r) => *r,
+                    None => {
+                        let r = b
+                            .entities
+                            .iter()
+                            .map(|c| z_range_cached(d, c, depth + 1, cache))
+                            .fold(None, |r: Option<(f64, f64)>, (lo, hi)| Some(r.map_or((lo, hi), |(a, z)| (a.min(lo), z.max(hi)))));
+                        cache.insert(key, r);
+                        r
+                    }
+                }?;
+                let place = |z: f64| i.insert.z + i.scale.z * (z - b.base.z);
+                let (p, q) = (place(inner.0), place(inner.1));
+                Some((p.min(q), p.max(q)))
+            })
+            .map(|(lo, hi)| {
+                // Attached attributes sit where they are, not in the definition.
+                i.attribs.iter().filter(|a| !a.invisible).fold((lo, hi), |(lo, hi), a| {
+                    let z = a.multiline.as_ref().map_or(a.text.insert.z, |m| m.mtext.insert.z);
+                    (lo.min(z), hi.max(z))
+                })
+            }),
         _ => None,
     };
     r.filter(|(a, b)| a.is_finite() && b.is_finite()).unwrap_or_else(|| {
@@ -1093,7 +1102,7 @@ fn intersections(a: &Entity, b: &Entity, mode: i64) -> Vec<Vec2> {
         return Vec::new();
     }
     let near = |segs: &[Segment], p: Vec2| segs.iter().any(|s| s.closest(p).dist(p) <= 1e-7 * (1.0 + p.x.abs().max(p.y.abs())));
-    let mut out: Vec<Vec2> = Vec::new();
+    let mut raw: Vec<Vec2> = Vec::new();
     for s in &pa {
         for t in &pb {
             for p in intersect_ext(s, t, mode != 0) {
@@ -1102,10 +1111,32 @@ fn intersections(a: &Entity, b: &Entity, mode: i64) -> Vec<Vec2> {
                     2 => near(&pa, p),
                     _ => true,
                 };
-                if keep && p.is_finite() && !out.iter().any(|q| q.dist(p) <= 1e-9 * (1.0 + p.x.abs().max(p.y.abs()))) {
-                    out.push(p);
+                if keep && p.is_finite() {
+                    raw.push(p);
                 }
             }
+        }
+    }
+    dedup_points(raw)
+}
+
+/// Drop repeated points (within a tolerance relative to the coordinates' size), keeping the
+/// first of each in order. A grid of tolerance-sized cells keeps this linear: each point looks
+/// only at its own and the eight neighbouring cells.
+pub(super) fn dedup_points(raw: Vec<Vec2>) -> Vec<Vec2> {
+    let size = raw.iter().fold(0.0f64, |m, p| m.max(p.x.abs()).max(p.y.abs()));
+    let tol = 1e-9 * (1.0 + size);
+    let cell = |v: f64| (v / tol).floor() as i64;
+    let mut grid: HashMap<(i64, i64), Vec<Vec2>> = HashMap::new();
+    let mut out = Vec::new();
+    for p in raw {
+        let (cx, cy) = (cell(p.x), cell(p.y));
+        let seen = (-1..=1).any(|dx| {
+            (-1..=1).any(|dy| grid.get(&(cx.saturating_add(dx), cy.saturating_add(dy))).is_some_and(|v| v.iter().any(|q| q.dist(p) <= tol)))
+        });
+        if !seen {
+            grid.entry((cx, cy)).or_default().push(p);
+            out.push(p);
         }
     }
     out
@@ -1334,7 +1365,7 @@ fn element_index(sa: &SafeArray, v: &Value, len: usize) -> Result<usize, LispErr
 fn vlax_safearray_get_element(_ctx: &mut Ctx<'_>, a: Vec<Value>) -> F {
     arity(&a, 2, 2)?;
     let sa = safearray(&a[0])?;
-    let items = sa.to_vec();
+    let items = sa.items.lock().map_err(|_| LispError::new("safearray unavailable"))?;
     let k = element_index(sa, &a[1], items.len())?;
     Ok(Flow::Value(items.get(k).cloned().unwrap_or_default()))
 }
