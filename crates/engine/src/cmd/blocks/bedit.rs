@@ -95,7 +95,7 @@ fn block_of(d: &Drawing, h: Handle) -> Option<String> {
 /// The dynamic block whose anonymous block `name` is (a dynamic block reference with values of
 /// its own shows one, `*U12`): its BLOCK_RECORD's `AcDbBlockRepBTag` xdata names the dynamic
 /// block's record. `None` for other blocks.
-fn dynamic_definition(d: &Drawing, name: &str) -> Option<String> {
+pub(crate) fn dynamic_definition(d: &Drawing, name: &str) -> Option<String> {
     if !name.starts_with('*') {
         return None;
     }
