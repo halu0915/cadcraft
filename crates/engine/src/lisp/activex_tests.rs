@@ -1094,3 +1094,36 @@ fn entnext_follows_entdel_swaps() {
     let v = ok(&mut s, "(progn (entdel b) (setq first1 (entnext)) (entdel a) (entdel b) (list (equal (entnext) b) (equal first1 a)))");
     assert_eq!(v, "(T T)");
 }
+
+/// A reference inside a block definition can't be renamed to that block or one that reaches it:
+/// the definition would contain itself (GitHub Codex review).
+#[test]
+fn a_block_member_cannot_be_renamed_into_a_cycle() {
+    let mut s = session();
+    ok(
+        &mut s,
+        r#"(progn
+  (entmake '((0 . "BLOCK") (2 . "B") (70 . 0) (10 0.0 0.0 0.0)))
+  (entmake '((0 . "LINE") (10 0.0 0.0 0.0) (11 1.0 0.0 0.0)))
+  (entmake '((0 . "ENDBLK")))
+  (entmake '((0 . "BLOCK") (2 . "A") (70 . 0) (10 0.0 0.0 0.0)))
+  (entmake '((0 . "INSERT") (2 . "B") (10 0.0 0.0 0.0)))
+  (entmake '((0 . "ENDBLK")))
+  (entmake '((0 . "BLOCK") (2 . "C") (70 . 0) (10 0.0 0.0 0.0)))
+  (entmake '((0 . "INSERT") (2 . "A") (10 0.0 0.0 0.0)))
+  (entmake '((0 . "ENDBLK")))
+  (setq blocks (vla-get-blocks (vla-get-activedocument (vlax-get-acad-object))))
+  (vlax-for o (vla-item blocks "A") (setq member o)))"#,
+    );
+    let caught = |s: &mut Session, to: &str| ok(s, &format!("(vl-catch-all-error-p (vl-catch-all-apply 'vla-put-Name (list member \"{to}\")))"));
+    assert_eq!(caught(&mut s, "A"), "T", "A containing A");
+    assert_eq!(caught(&mut s, "C"), "T", "A containing C, which contains A");
+    assert_eq!(ok(&mut s, "(vla-get-Name member)"), "\"B\"");
+    // A rename that makes no cycle still works.
+    ok(
+        &mut s,
+        r#"(progn (entmake '((0 . "BLOCK") (2 . "D") (70 . 0) (10 0.0 0.0 0.0))) (entmake '((0 . "LINE") (10 0.0 0.0 0.0) (11 0.0 1.0 0.0))) (entmake '((0 . "ENDBLK"))))"#,
+    );
+    ok(&mut s, "(vla-put-Name member \"D\")");
+    assert_eq!(ok(&mut s, "(vla-get-Name member)"), "\"D\"");
+}

@@ -578,6 +578,13 @@ fn put_prop(ctx: &mut Ctx<'_>, o: &Vla, p: &str, v: &Value) -> Result<(), PropEr
             }
             let e = writable_entity(d, o)?;
             let new = entity_put(d, &e, p, v)?;
+            // A reference in a block definition can't come to refer to that block, directly or
+            // through the blocks it reaches (the definition would contain itself).
+            if let Vla::Entity { block: Some(owner), .. } = o
+                && crate::cmd::blocks::references_block(d, std::slice::from_ref(&new), owner)
+            {
+                return Err(PropErr::Lisp(automation("A block cannot reference itself")));
+            }
             let d = doc_mut(ctx)?;
             if !replace_entity(d, o, new) {
                 return Err(PropErr::Lisp(automation("Object was erased")));
