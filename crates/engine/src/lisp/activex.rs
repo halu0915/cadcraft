@@ -1109,7 +1109,9 @@ fn intersections(a: &Entity, b: &Entity, mode: i64) -> Result<Vec<Vec2>, LispErr
     }
     // A crossing of one piece pair must lie on the piece of the object that isn't extended
     // (a crossing on another of its pieces is found with that piece's own pair).
-    let near = |seg: &Segment, p: Vec2| seg.closest(p).dist(p) <= 1e-7 * (1.0 + p.x.abs().max(p.y.abs()));
+    // How close counts as on it: relative to the piece's own size, plus the rounding a point that
+    // far from the origin carries (about 1e-5 at 1e9) -- not a fraction of the coordinates.
+    let near = |seg: &Segment, p: Vec2| seg.closest(p).dist(p) <= 1e-9 * (1.0 + seg.len()) + 1e-14 * p.x.abs().max(p.y.abs());
     let mut raw: Vec<Vec2> = Vec::new();
     for s in &pa {
         for t in &pb {
@@ -1263,11 +1265,19 @@ fn blank(vtype: i32) -> Value {
 /// A value converted to safearray element type `vtype`.
 fn coerce(vtype: i32, v: &Value) -> Result<Value, LispError> {
     Ok(match vtype {
-        VB_INTEGER | VB_LONG => match v {
-            Value::Int(_) => v.clone(),
-            Value::Real(r) if r.is_finite() && r.abs() < 2_147_483_648.0 => Value::Int(r.round() as i32),
-            other => return Err(LispError::bad_arg("numberp", other)),
-        },
+        VB_INTEGER | VB_LONG => {
+            let n = match v {
+                Value::Int(i) => i64::from(*i),
+                Value::Real(r) if r.is_finite() && r.abs() < 2_147_483_648.0 => r.round() as i64,
+                other => return Err(LispError::bad_arg("numberp", other)),
+            };
+            // vlax-vbInteger is a signed 16-bit integer, vlax-vbLong a signed 32-bit one.
+            let fits = if vtype == VB_INTEGER { i16::try_from(n).is_ok() } else { i32::try_from(n).is_ok() };
+            match i32::try_from(n) {
+                Ok(i) if fits => Value::Int(i),
+                _ => return Err(automation("Overflow")),
+            }
+        }
         VB_SINGLE | VB_DOUBLE => Value::Real(number(v)?),
         // The string itself is shared, not copied (a copy would escape the memory budget).
         VB_STRING => {

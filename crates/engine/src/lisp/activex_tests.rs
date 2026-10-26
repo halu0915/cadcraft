@@ -965,3 +965,40 @@ fn too_many_segments_to_intersect_is_an_error() {
     );
     assert_eq!(v, "T");
 }
+
+/// A vlax-vbInteger safearray holds signed 16-bit values; vlax-vbLong keeps the 32-bit range
+/// (Hermes review F1).
+#[test]
+fn integer_safearrays_hold_16_bit_values() {
+    let mut s = session();
+    ok(&mut s, "(setq a (vlax-make-safearray vlax-vbInteger '(0 . 0)))");
+    let err = |s: &mut Session, code: &str| ok(s, &format!("(vl-catch-all-error-p (vl-catch-all-apply '(lambda () {code}) nil))"));
+    assert_eq!(err(&mut s, "(vlax-safearray-put-element a 0 32768)"), "T");
+    assert_eq!(err(&mut s, "(vlax-safearray-put-element a 0 -32769)"), "T");
+    assert_eq!(err(&mut s, "(vlax-safearray-put-element a 0 40000.0)"), "T");
+    ok(&mut s, "(vlax-safearray-put-element a 0 32767)");
+    assert_eq!(ok(&mut s, "(vlax-safearray-get-element a 0)"), "32767");
+    ok(&mut s, "(vlax-safearray-put-element a 0 -32768)");
+    assert_eq!(ok(&mut s, "(vlax-safearray-get-element a 0)"), "-32768");
+    ok(&mut s, "(setq b (vlax-make-safearray vlax-vbLong '(0 . 0)))");
+    ok(&mut s, "(vlax-safearray-put-element b 0 32768)");
+    assert_eq!(ok(&mut s, "(vlax-safearray-get-element b 0)"), "32768");
+}
+
+/// Extending only this object: a crossing must lie on the other, finite one, and how close is
+/// close enough doesn't grow with distance from the origin (Hermes review F2).
+#[test]
+fn one_sided_intersections_far_from_the_origin() {
+    let mut s = session();
+    for x0 in [0.0, 1e9] {
+        let a = line(&mut s, [x0, 0.0], [x0 + 2.0, 0.0]);
+        let b = line(&mut s, [x0 + 5.0, 10.0], [x0 + 5.0, 20.0]);
+        let v = ok(&mut s, &format!("(vlax-invoke (vlax-ename->vla-object {a}) 'IntersectWith (vlax-ename->vla-object {b}) acExtendThisEntity)"));
+        assert_eq!(v, "nil", "x0 = {x0}: B is ten units above the extended A");
+        // A real crossing on B is still found there.
+        let c = line(&mut s, [x0 + 5.0, -10.0], [x0 + 5.0, 10.0]);
+        let code = format!("(vlax-invoke (vlax-ename->vla-object {a}) 'IntersectWith (vlax-ename->vla-object {c}) acExtendThisEntity)");
+        near(&mut s, &format!("(- (car {code}) {x0:.1})"), 5.0);
+        near(&mut s, &format!("(cadr {code})"), 0.0);
+    }
+}
