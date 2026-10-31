@@ -24,7 +24,9 @@ its entity values, including imported DXF values. MTEXT uses STYLE values plus
 inline formatting. Font-unit advances, normalized by each font's own cap height,
 are shared by measurement and rendering. SHX geometry remains vector strokes in
 PDF and follows the same renderer for screen and PNG. Missing characters use the
-existing built-in/installed fallback; warnings are deduplicated.
+existing built-in/installed fallback; warnings are deduplicated. Lines containing
+right-to-left text use the existing whole-line contextual fallback, preserving
+bidi ordering and Arabic joining (including mixed Latin text).
 
 The `cadcraft-fonts` example `shx_measure` accepts two local font paths, height,
 width factor and strings, and prints numeric advances for local acceptance. It

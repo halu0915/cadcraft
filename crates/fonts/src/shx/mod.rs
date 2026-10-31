@@ -182,6 +182,18 @@ impl Pair {
                 }
             }
         }
+        let legacy_symbol = match c {
+            '°' => Some(256),
+            '±' => Some(257),
+            '⌀' => Some(258),
+            _ => None,
+        };
+        if self.regular.kind != Kind::Unicode
+            && let Some(code) = legacy_symbol
+            && self.regular.contains(code)
+        {
+            return self.regular.glyph(code).ok().map(|g| (g, self.regular.above));
+        }
         let code = match c {
             '⌀' if self.regular.contains(0x2300) => 0x2300,
             '⌀' if self.regular.contains(0x2205) => 0x2205,
@@ -191,6 +203,12 @@ impl Pair {
         self.regular.glyph(code).ok().map(|g| (g, self.regular.above))
     }
     pub fn shape(&self, s: &str, height: f64, wf: f64, oblique: f64) -> crate::Shaped {
+        // Keep the existing whole-line bidi and contextual shaping path. Splitting
+        // missing RTL characters into isolated fallback glyphs breaks their order/joining.
+        if crate::bidi::has_rtl(s) {
+            resolver::warn("SHX right-to-left line uses contextual fallback");
+            return crate::shape_stroke(s, height, wf, oblique);
+        }
         let h = if height.is_finite() && height > 0.0 { height } else { 1.0 };
         let wf = if wf.is_finite() && wf.abs() > 1e-6 { wf } else { 1.0 };
         let shear = if oblique.is_finite() { oblique.tan().clamp(-10.0, 10.0) } else { 0.0 };

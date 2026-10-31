@@ -195,3 +195,43 @@ fn ascii_bigfont_escape_pair_consumes_two_characters() {
     let pair = Pair { regular: Arc::new(font(&[8, 7, 0, 0])), big: Some(Arc::new(big)), encoding: Encoding::Big5 };
     assert_eq!(pair.shape("|AA", 10., 1., 0.).width, 19.);
 }
+
+#[test]
+fn compiled_clockwise_arc_uses_direction_bit() {
+    let g = font(&[10, 10, 0x82, 0]).glyph(65).unwrap();
+    assert!((g.width + 10.).abs() < 1e-9);
+    assert!((g.strokes.last().unwrap()[1].y + 10.).abs() < 1e-9);
+    let g = font(&[11, 56, 28, 0, 3, 0x92, 0]).glyph(65).unwrap();
+    let start = (1. - 56. / 256.) * std::f64::consts::FRAC_PI_4;
+    let end = -(28. / 256.) * std::f64::consts::FRAC_PI_4;
+    let p = g.strokes.last().unwrap()[1];
+    assert!((p.x - 3. * (end.cos() - start.cos())).abs() < 1e-9);
+    assert!((p.y - 3. * (end.sin() - start.sin())).abs() < 1e-9);
+}
+#[test]
+fn legacy_special_symbols_use_documented_records() {
+    let regular = Arc::new(
+        Font::parse(&fixture(
+            Kind::Shapes,
+            &[(256, &[8, 3, 0, 0]), (257, &[8, 5, 0, 0]), (258, &[8, 7, 0, 0]), (176, &[8, 99, 0, 0]), (177, &[8, 99, 0, 0]), (216, &[8, 99, 0, 0])],
+        ))
+        .unwrap(),
+    );
+    let pair = Pair { regular, big: None, encoding: Encoding::Big5 };
+    assert_eq!(pair.shape("%%d%%p%%c", 10., 1., 0.).width, 15.);
+    let regular = Arc::new(
+        Font::parse(&fixture(Kind::Unicode, &[(176, &[8, 3, 0, 0]), (177, &[8, 5, 0, 0]), (0x2205, &[8, 7, 0, 0]), (256, &[8, 99, 0, 0])])).unwrap(),
+    );
+    let pair = Pair { regular, big: None, encoding: Encoding::Big5 };
+    assert_eq!(pair.shape("%%d%%p%%c", 10., 1., 0.).width, 15.);
+}
+#[test]
+fn rtl_fallback_keeps_whole_line_order_and_context() {
+    let pair = Pair { regular: Arc::new(font(&[8, 7, 0, 0])), big: None, encoding: Encoding::Big5 };
+    for text in ["אבג A", "سلام A", "A\u{200f}B"] {
+        let actual = pair.shape(text, 10., 0.8, 0.2);
+        let expected = crate::shape_stroke(text, 10., 0.8, 0.2);
+        assert_eq!(actual.width, expected.width);
+        assert_eq!(actual.strokes, expected.strokes);
+    }
+}

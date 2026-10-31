@@ -162,8 +162,9 @@ impl State {
                 } else {
                     (0.0, 0.0, f64::from(r.byte()?))
                 };
-                let spec = r.byte()? as i8;
-                let unsigned = spec.unsigned_abs();
+                // Compiled SHX stores arc direction in bit 7 (not two's complement).
+                let spec = r.byte()?;
+                let unsigned = spec & 0x7f;
                 if unsigned > 0x77 {
                     return Err(Error("invalid octant specification"));
                 }
@@ -172,7 +173,7 @@ impl State {
                 if count > 7 {
                     return Err(Error("invalid octant count"));
                 }
-                let sign = if spec < 0 { -1.0 } else { 1.0 };
+                let sign = if spec & 0x80 != 0 { -1.0 } else { 1.0 };
                 let start = (oct + sign * start_off) * FRAC_PI_4;
                 let sweep = if op == 10 {
                     sign * if count == 0 { TAU } else { f64::from(count) * FRAC_PI_4 }
