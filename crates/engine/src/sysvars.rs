@@ -68,6 +68,7 @@ const SESSION_VARS: &[&str] = &[
     "MEASUREINIT",
     "LASTPOINT",
     "FONTALT",
+    "FONTPATH",
     "FONTFALLBACK",
     "SAVETIME",
     "SAVEFILEPATH",
@@ -151,6 +152,7 @@ pub fn get(s: &Session, name: &str) -> Option<Value> {
         // Text, as AutoCAD reads it back; the header keeps the index (and CECOLOR_RGB) for DXF.
         "CECOLOR" => json!(crate::cmd::current_color_value(s.doc().ok()?)),
         // Process-wide font substitution (profile settings, not saved in the drawing).
+        "FONTPATH" => json!(cadcraft_fonts::shx::font_path()),
         "FONTALT" => json!(cadcraft_fonts::ttf::font_alt()),
         "FONTFALLBACK" => json!(cadcraft_fonts::ttf::fallback_fonts()),
         // Autosave (profile settings too).
@@ -365,6 +367,7 @@ pub fn set(s: &mut Session, name: &str, v: &Value) -> Result<()> {
         "MAXARRAY" => st.maxarray = as_f64(v).ok_or_else(bad)?.clamp(100.0, 10_000_000.0) as u64,
         "ZOOMFACTOR" => st.zoomfactor = as_i(v).filter(|z| (3..=100).contains(z)).ok_or_else(bad)? as u32,
         "MEASUREINIT" => st.measureinit = small(v, 1).ok_or_else(bad)? == 1,
+        "FONTPATH" => cadcraft_fonts::shx::set_font_path(v.as_str().ok_or_else(bad)?),
         "FONTALT" => cadcraft_fonts::ttf::set_font_alt(v.as_str().ok_or_else(bad)?),
         "FONTFALLBACK" => cadcraft_fonts::ttf::set_fallback_fonts(v.as_str().ok_or_else(bad)?),
         "SAVETIME" => crate::autosave::set_savetime(

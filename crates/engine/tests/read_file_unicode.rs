@@ -17,7 +17,11 @@ fn read_file_refuses_a_name_that_is_not_unicode() {
     let good = dir.join("good.dxf");
     let bad = dir.join(OsString::from_vec(b"bad-\xff.dxf".to_vec()));
     std::fs::write(&good, b"0\nEOF\n").unwrap();
-    std::fs::write(&bad, b"0\nEOF\n").unwrap();
+    // Rejection precedes file I/O. APFS may reject the raw byte name itself;
+    // the API must still report its Unicode error, even when that file cannot exist.
+    if let Err(e) = std::fs::write(&bad, b"0\nEOF\n") {
+        assert!(cfg!(target_os = "macos") && e.raw_os_error() == Some(92), "unexpected filesystem error: {e}");
+    }
     let e = read_file(&bad).err().expect("a non-Unicode name is refused");
     assert!(e.contains("not valid Unicode") && e.contains("bad-"), "{e}");
     assert!(read_file(&good).is_ok());

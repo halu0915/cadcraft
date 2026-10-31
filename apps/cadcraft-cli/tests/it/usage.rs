@@ -830,6 +830,17 @@ fn non_unicode_output_names() {
         n.extend_from_slice(ext.as_bytes());
         s.0.join(OsString::from_vec(n))
     };
+    // APFS on macOS rejects non-UTF-8 names with EILSEQ. The CLI must surface
+    // that filesystem error cleanly; on filesystems that accept them, preserve the bytes.
+    let probe = latin1("probe");
+    let filesystem_error = match std::fs::write(&probe, b"probe") {
+        Ok(()) => {
+            std::fs::remove_file(&probe).unwrap();
+            None
+        }
+        Err(e) if cfg!(target_os = "macos") && e.raw_os_error() == Some(92) => Some(e.to_string()),
+        Err(e) => panic!("unexpected filesystem probe failure: {e}"),
+    };
     let run = |args: Vec<OsString>| {
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = cadcraft_cli::run(args, &mut out, &mut err);
@@ -843,9 +854,15 @@ fn non_unicode_output_names() {
     ];
     for (args, path) in cases {
         let (code, err) = run(args.clone());
-        assert_eq!(code, 0, "{args:?}: {err}");
-        assert!(path.exists(), "{path:?}");
-        assert!(std::fs::metadata(&path).expect("stat output").len() > 0, "{path:?}");
+        if let Some(os_error) = &filesystem_error {
+            assert_eq!(code, 1, "{args:?}: {err}");
+            assert!(err.contains(os_error), "{args:?}: {err}");
+            assert!(!path.exists(), "{path:?}");
+        } else {
+            assert_eq!(code, 0, "{args:?}: {err}");
+            assert!(path.exists(), "{path:?}");
+            assert!(std::fs::metadata(&path).expect("stat output").len() > 0, "{path:?}");
+        }
     }
     // An input with such a name is still refused.
     let (code, err) = run(vec!["info".into(), latin1("dxf").into()]);
