@@ -235,3 +235,52 @@ fn rtl_fallback_keeps_whole_line_order_and_context() {
         assert_eq!(actual.strokes, expected.strokes);
     }
 }
+
+#[test]
+fn unavailable_escape_glyph_preserves_both_characters() {
+    let regular = Arc::new(Font::parse(&fixture(Kind::Shapes, &[(124, &[8, 3, 0, 0]), (90, &[8, 7, 0, 0])])).unwrap());
+    for entries in [vec![], vec![(0x7c5a, &[6, 0][..])]] {
+        let mut big = Font::parse(&fixture(Kind::BigFont, &entries)).unwrap();
+        big.ranges = vec![(124, 124)];
+        let pair = Pair { regular: regular.clone(), big: Some(Arc::new(big)), encoding: Encoding::Big5 };
+        assert_eq!(pair.shape("|Z", 10., 1., 0.).width, 10.);
+    }
+}
+#[test]
+fn metadata_cannot_be_executed_or_redefined() {
+    for kind in [Kind::Shapes, Kind::Unicode, Kind::BigFont] {
+        let f = Font::parse(&fixture(kind, &[(65, &[7, 0, 0, 0, 0, 0, 1, 1, 0])])).unwrap();
+        assert!(!f.contains(0));
+        assert!(f.glyph(0).is_err());
+        assert!(f.glyph(65).is_err());
+        assert!(Font::parse(&fixture(kind, &[(0, &[20, 0, 0, 0, 0, 0])])).is_err());
+    }
+}
+#[test]
+fn legacy_shape_numbers_do_not_alias_unicode() {
+    let regular = Arc::new(Font::parse(&fixture(Kind::Shapes, &[(0x4e2d, &[8, 99, 0, 0])])).unwrap());
+    let pair = Pair { regular, big: None, encoding: Encoding::Big5 };
+    assert!(pair.glyph('中').is_none());
+    let regular = Arc::new(Font::parse(&fixture(Kind::BigFont, &[(0x96fb, &[8, 99, 0, 0]), (0xeb8a, &[8, 7, 0, 0])])).unwrap());
+    let pair = Pair { regular, big: None, encoding: Encoding::Gb };
+    // GBK encodes U+96FB as EB8A, not its Unicode scalar 96FB.
+    assert_eq!(pair.shape("電", 10., 1., 0.).width, 7.);
+}
+#[test]
+fn invalid_arc_radii_and_reverse_fractional_spans_are_rejected() {
+    for p in [&[10, 0, 0, 0][..], &[11, 200, 50, 0, 10, 1, 0], &[11, 200, 50, 0, 10, 0x81, 0]] {
+        assert!(font(p).glyph(65).is_err());
+    }
+}
+#[test]
+fn invalid_width_uses_positive_default_for_shx_and_fallback() {
+    let pair = Pair { regular: Arc::new(font(&[8, 7, 0, 0])), big: None, encoding: Encoding::Big5 };
+    for text in ["A", "AB", "אב A"] {
+        let expected = pair.shape(text, 10., 1., 0.);
+        for wf in [-1., 0., f64::NAN, f64::INFINITY] {
+            let actual = pair.shape(text, 10., wf, 0.);
+            assert_eq!(actual.width, expected.width);
+            assert_eq!(actual.strokes, expected.strokes);
+        }
+    }
+}

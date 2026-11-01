@@ -86,7 +86,9 @@ impl Font {
                     index.push((r.word()?, usize::from(r.word()?)));
                 }
                 for (code, len) in index {
-                    shapes.insert(code, program(r.bytes(len)?)?);
+                    if shapes.insert(code, program(r.bytes(len)?)?).is_some() {
+                        return Err(Error("duplicate shape record"));
+                    }
                 }
             }
             Kind::BigFont => {
@@ -114,7 +116,9 @@ impl Font {
                         continue;
                     }
                     let mut rec = Reader { data, pos: offset };
-                    shapes.insert(code, program(rec.bytes(len)?)?);
+                    if shapes.insert(code, program(rec.bytes(len)?)?).is_some() {
+                        return Err(Error("duplicate shape record"));
+                    }
                 }
             }
             Kind::Unicode => {
@@ -128,7 +132,9 @@ impl Font {
                 while r.pos < data.len() {
                     let code = r.word()?;
                     let len = usize::from(r.word()?);
-                    shapes.insert(code, program(r.bytes(len)?)?);
+                    if shapes.insert(code, program(r.bytes(len)?)?).is_some() {
+                        return Err(Error("duplicate shape record"));
+                    }
                 }
             }
         }
@@ -144,7 +150,7 @@ impl Font {
         vm::render(self, code)
     }
     pub fn contains(&self, code: u16) -> bool {
-        self.shapes.contains_key(&code)
+        code != 0 && self.shapes.contains_key(&code)
     }
 }
 
@@ -163,9 +169,7 @@ pub struct Pair {
 }
 impl Pair {
     fn glyph(&self, c: char) -> Option<(crate::Run, f64)> {
-        if !c.is_ascii()
-            && let Some(big) = &self.big
-        {
+        let encoded = |big: &Font| {
             let mut buf = [0; 4];
             let codec = match self.encoding {
                 Encoding::Big5 => encoding_rs::BIG5,
@@ -177,10 +181,17 @@ impl Pair {
                 && big.ranges.iter().any(|(a, b)| (*a..=*b).contains(&u16::from(*hi)))
             {
                 let code = (u16::from(*hi) << 8) | u16::from(*lo);
-                if let Ok(g) = big.glyph(code) {
-                    return Some((g, big.above));
-                }
+                return big.glyph(code).ok().map(|g| (g, big.above));
             }
+            None
+        };
+        if !c.is_ascii()
+            && let Some(glyph) = self.big.as_deref().and_then(encoded)
+        {
+            return Some(glyph);
+        }
+        if self.regular.kind == Kind::BigFont {
+            return encoded(&self.regular);
         }
         let legacy_symbol = match c {
             '°' => Some(256),
@@ -195,14 +206,18 @@ impl Pair {
             return self.regular.glyph(code).ok().map(|g| (g, self.regular.above));
         }
         let code = match c {
-            '⌀' if self.regular.contains(0x2300) => 0x2300,
-            '⌀' if self.regular.contains(0x2205) => 0x2205,
+            '⌀' if self.regular.kind == Kind::Unicode && self.regular.contains(0x2300) => 0x2300,
+            '⌀' if self.regular.kind == Kind::Unicode && self.regular.contains(0x2205) => 0x2205,
             '⌀' if self.regular.kind != Kind::Unicode => 216,
             _ => u16::try_from(u32::from(c)).ok()?,
         };
+        if self.regular.kind == Kind::Shapes && code > 255 {
+            return None;
+        }
         self.regular.glyph(code).ok().map(|g| (g, self.regular.above))
     }
     pub fn shape(&self, s: &str, height: f64, wf: f64, oblique: f64) -> crate::Shaped {
+        let wf = if wf.is_finite() && wf > 1e-6 { wf } else { 1.0 };
         // Keep the existing whole-line bidi and contextual shaping path. Splitting
         // missing RTL characters into isolated fallback glyphs breaks their order/joining.
         if crate::bidi::has_rtl(s) {
@@ -210,7 +225,6 @@ impl Pair {
             return crate::shape_stroke(s, height, wf, oblique);
         }
         let h = if height.is_finite() && height > 0.0 { height } else { 1.0 };
-        let wf = if wf.is_finite() && wf.abs() > 1e-6 { wf } else { 1.0 };
         let shear = if oblique.is_finite() { oblique.tan().clamp(-10.0, 10.0) } else { 0.0 };
         let mut out = crate::Shaped::default();
         let mut spans = Vec::new();
@@ -231,10 +245,17 @@ impl Pair {
                     return None;
                 }
                 let code = ((c as u16) << 8) | next as u16;
+                let g = match big.glyph(code) {
+                    Ok(g) => g,
+                    Err(_) => {
+                        resolver::warn("SHX escape glyph unavailable; preserving both characters");
+                        return None;
+                    }
+                };
                 characters.next();
-                Some(big.glyph(code).ok().map(|g| (g, big.above)))
+                Some((g, big.above))
             });
-            if let Some((g, cap)) = escaped.unwrap_or_else(|| self.glyph(c)) {
+            if let Some((g, cap)) = escaped.or_else(|| self.glyph(c)) {
                 let scale = h / cap;
                 out.strokes.extend(
                     g.strokes

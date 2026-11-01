@@ -59,6 +59,9 @@ impl State {
         Ok(())
     }
     fn shape(&mut self, font: &Font, code: u16, depth: usize) -> Result<()> {
+        if code == 0 {
+            return Err(Error("font metadata is not a glyph"));
+        }
         if depth >= 32 {
             return Err(Error("subshape recursion limit"));
         }
@@ -163,6 +166,9 @@ impl State {
                     (0.0, 0.0, f64::from(r.byte()?))
                 };
                 // Compiled SHX stores arc direction in bit 7 (not two's complement).
+                if radius == 0.0 {
+                    return Err(Error("zero arc radius"));
+                }
                 let spec = r.byte()?;
                 let unsigned = spec & 0x7f;
                 if unsigned > 0x77 {
@@ -180,6 +186,9 @@ impl State {
                 } else {
                     sign * (f64::from(if count == 0 { 8 } else { count }) - if end_off == 0.0 { 0.0 } else { 1.0 } + end_off - start_off) * FRAC_PI_4
                 };
+                if sweep * sign <= 0.0 {
+                    return Err(Error("invalid fractional arc span"));
+                }
                 if execute {
                     self.arc(radius * self.scale, start, sweep)?;
                 }
