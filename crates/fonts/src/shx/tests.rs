@@ -334,3 +334,18 @@ fn contiguous_fallback_retains_spacing_controls_and_decorations() {
     }
     assert!((pair.shape("ABBA", 6., 1., 0.).width - (4.2 + 9.6 + 4.2)).abs() < 1e-9);
 }
+
+#[test]
+fn fallback_breaks_shx_decoration_spans() {
+    let pair = Pair { regular: Arc::new(font(&[8, 7, 0, 0])), big: None, encoding: Encoding::Big5 };
+    for (control, y) in [("%%u", -2.), ("%%o", 12.)] {
+        let text = format!("{control}A{control}B{control}A");
+        let actual = pair.shape(&text, 10., 1., 0.);
+        let decoration: Vec<_> = actual.strokes.iter().filter(|st| st.iter().all(|p| p.y == y)).cloned().collect();
+        assert_eq!(
+            decoration,
+            vec![vec![Vec2::new(0., y), Vec2::new(7., y)], vec![Vec2::new(actual.width - 7., y), Vec2::new(actual.width, y)],],
+            "{control}"
+        );
+    }
+}

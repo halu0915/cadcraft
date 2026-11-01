@@ -297,6 +297,8 @@ impl Pair {
                 fallback.map(|p| p + Vec2::new(x, 0.0));
                 out.width += fallback.width;
                 out.extend(fallback);
+                // Its own decorations must not connect the surrounding SHX spans.
+                spans.push((x, out.width, false, false));
                 continue; // Fallback already contains this run's decorations.
             }
             spans.push((x, out.width, u, o));
