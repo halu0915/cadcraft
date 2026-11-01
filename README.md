@@ -151,15 +151,18 @@ fonts: BIZ UDPGothic, BIZ UDMincho and Shippori Mincho (Japanese) and Noto Sans 
 build, which has no system fonts, only BIZ UDPGothic Regular and Noto Sans Arabic). A text style
 can use them by family name, and they draw characters a text's font lacks when no installed
 wide-coverage CJK font has them. Without `CRAFT_FONTS_DIR` nothing is embedded. SHX
-fonts (including big fonts such as `chineset.shx`) aren't read yet: text in an SHX style is drawn
-with our own stroke font, and any character a text's font lacks (CJK, for example) is drawn from
-an installed font that has it, preferring wide-coverage fonts such as Noto Sans CJK, Source Han
-Sans, WenQuanYi, PingFang or Microsoft JhengHei. Two settings, set with `SETVAR` or (for every
-run) an environment variable, steer this:
+shape fonts, Unicode fonts and big fonts can be loaded from user-supplied files. TEXT and
+MTEXT use their stroke geometry and advances for display, PNG and PDF export. No SHX fonts
+are bundled. Missing files or glyphs warn and use the existing font fallback. STYLE's font,
+big font, width and oblique settings are honored (TEXT stores width/oblique on creation).
+`CADCRAFT_SHX_ENCODING=big5` (default) or `gbk` selects the legacy big-font encoding;
+escape ranges alone cannot distinguish these encodings. Settings below can be changed
+with `SETVAR` or supplied as environment variables:
 
 | Variable | Environment | Meaning |
 |---|---|---|
-| `FONTALT` | `CADCRAFT_FONTALT` | Font used instead of a text style font that can't be found (an SHX file, a missing TTF), by file or family name, e.g. `Noto Sans CJK TC`. Empty (default) = our stroke font. |
+| `FONTPATH` | `CADCRAFT_FONTPATH` | SHX search directories, separated by the platform path separator (`:` on Unix, `;` on Windows). File names are matched without case. Changing this setting clears the SHX cache. |
+| `FONTALT` | `CADCRAFT_FONTALT` | Font used instead of a text style font that can't be found (a missing SHX or TTF file), by file or family name, e.g. `Noto Sans CJK TC`. Empty (default) = our stroke font. |
 | `FONTFALLBACK` | `CADCRAFT_FONTFALLBACK` | Fonts tried first for characters a text's font lacks, comma-separated, e.g. `Noto Sans CJK TC, msjh.ttc`. |
 
 `.` clears either one.

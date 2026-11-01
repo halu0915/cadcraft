@@ -229,6 +229,10 @@ fn font_switch(a: &str) -> Option<TextFont> {
 /// Parse MTEXT contents into words, spaces and paragraph breaks with their formats.
 fn parse(contents: &str, base: Fmt) -> (Vec<Atom>, Vec<Fmt>) {
     let chars: Vec<char> = contents.chars().collect();
+    let style_big = match &base.font {
+        TextFont::Shx(pair) => Some((pair.big.clone(), pair.encoding)),
+        _ => None,
+    };
     let mut fmts = vec![base];
     let mut cur = 0usize;
     let mut stack: Vec<usize> = Vec::new();
@@ -316,7 +320,11 @@ fn parse(contents: &str, base: Fmt) -> (Vec<Atom>, Vec<Fmt>) {
                     'f' | 'F' => {
                         let (a, n) = arg(&chars, i);
                         i = n;
-                        if let Some(font) = font_switch(&a) {
+                        if let Some(mut font) = font_switch(&a) {
+                            if let (TextFont::Shx(pair), Some((big, encoding))) = (&mut font, &style_big) {
+                                pair.big = big.clone();
+                                pair.encoding = *encoding;
+                            }
                             derive(&mut fmts, &mut cur, &|f| f.font = font.clone());
                         }
                     }

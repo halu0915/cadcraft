@@ -16,6 +16,7 @@
 pub mod bidi;
 mod complex;
 mod mtext;
+pub mod shx;
 mod stroke;
 pub mod subset;
 pub mod ttf;
@@ -263,6 +264,9 @@ pub fn line_width(s: &str, height: f64, width_factor: f64) -> f64 {
 /// Width of the gap MTEXT leaves between two words. Words are measured without their trailing
 /// letter gap, so the stroke font's gap is added on both sides of the space, as TEXT lays it out.
 pub fn space_width(font: &TextFont, height: f64, width_factor: f64) -> f64 {
+    if let TextFont::Shx(pair) = font {
+        return pair.shape(" ", height, width_factor, 0.0).width;
+    }
     if let TextFont::Outline(face) = font
         && let Some(w) = ttf::width(face, " ", height, width_factor)
     {
@@ -278,13 +282,24 @@ pub enum TextFont {
     #[default]
     Stroke,
     Outline(ttf::Face),
+    Shx(shx::Pair),
 }
 
 impl TextFont {
     /// Resolve a text style font name: an installed TTF/OTF/TTC when found; else, for a font we
-    /// can't find (an SHX file, a missing TTF), the FONTALT font ([`ttf::font_alt`]) when set;
+    /// can't find (a missing SHX or TTF), the FONTALT font ([`ttf::font_alt`]) when set;
     /// else the stroke font.
     pub fn resolve(name: &str) -> TextFont {
+        Self::resolve_style(name, "")
+    }
+    pub fn resolve_style(name: &str, big_font: &str) -> TextFont {
+        if let Some(regular) = shx::find(name) {
+            let encoding = match std::env::var("CADCRAFT_SHX_ENCODING").unwrap_or_default().to_ascii_lowercase().as_str() {
+                "gb" | "gbk" | "gb2312" => shx::Encoding::Gb,
+                _ => shx::Encoding::Big5,
+            };
+            return TextFont::Shx(shx::Pair { regular, big: shx::find(big_font), encoding });
+        }
         if let Some(f) = ttf::find(name) {
             return TextFont::Outline(f);
         }
@@ -414,6 +429,9 @@ pub(crate) fn decorations(spans: &[(f64, f64, bool, bool)], h: f64) -> Vec<Vec<V
 /// Shape one line in `font` (baseline at y = 0, x from 0). TrueType fonts that fail to parse
 /// fall back to the stroke font.
 pub fn shape_line(font: &TextFont, s: &str, height: f64, width_factor: f64, oblique: f64) -> Shaped {
+    if let TextFont::Shx(pair) = font {
+        return pair.shape(s, height, width_factor, oblique);
+    }
     if let TextFont::Outline(face) = font
         && let Some(sh) = ttf::shape(face, s, height, width_factor, oblique)
     {
@@ -424,6 +442,9 @@ pub fn shape_line(font: &TextFont, s: &str, height: f64, width_factor: f64, obli
 
 /// Width of one line in `font`.
 pub fn text_width(font: &TextFont, s: &str, height: f64, width_factor: f64) -> f64 {
+    if let TextFont::Shx(pair) = font {
+        return pair.shape(s, height, width_factor, 0.0).width;
+    }
     if let TextFont::Outline(face) = font
         && let Some(w) = ttf::width(face, s, height, width_factor)
     {
@@ -509,6 +530,7 @@ fn bottom_depth(font: &TextFont, height: f64) -> f64 {
     match font {
         TextFont::Outline(face) => ttf::descent_ratio(face).map_or(height / 3.0, |r| r * height),
         TextFont::Stroke => height / 3.0,
+        TextFont::Shx(pair) => height * pair.regular.below / pair.regular.above,
     }
 }
 

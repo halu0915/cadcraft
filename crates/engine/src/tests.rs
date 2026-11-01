@@ -568,6 +568,12 @@ fn sysvars_roundtrip() {
     assert_eq!(s.doc().unwrap().header.f64("LTSCALE", 0.0), 2.5);
     assert!(s.execute("setvar", &json!({"name": "ORTHOMODE", "value": "x"})).is_err());
     assert_eq!(sysvars::get(&s, "orthomode"), Some(json!(0)));
+    let previous_fontpath = cadcraft_fonts::shx::font_path();
+    s.execute("setvar", &json!({"name":"FONTPATH", "value":"/synthetic-fonts"})).unwrap();
+    assert_eq!(sysvars::get(&s, "FONTPATH"), Some(json!("/synthetic-fonts")));
+    assert!(s.doc().unwrap().header.get("FONTPATH").is_none());
+    assert!(s.execute("setvar", &json!({"name":"FONTPATH", "value":3})).is_err());
+    s.execute("setvar", &json!({"name":"FONTPATH", "value":previous_fontpath})).unwrap();
     // FONTALT is a process-wide font setting, not a drawing header variable.
     s.execute("setvar", &json!({"name": "FONTALT", "value": "no-such-font-130"})).unwrap();
     assert_eq!(sysvars::get(&s, "fontalt"), Some(json!("no-such-font-130")));
@@ -1489,4 +1495,17 @@ fn setvar_rejects_non_finite_text_for_real_variables() {
             assert_eq!(s.execute("getvar", &json!({"name": name})).unwrap(), before);
         }
     }
+}
+
+#[test]
+fn text_creation_copies_style_width_and_oblique() {
+    let mut s = Session::new();
+    s.execute("style", &json!({"name":"SHX-style", "font":"synthetic-missing.shx", "widthFactor":0.7, "oblique":15})).unwrap();
+    s.execute("setvar", &json!({"name":"TEXTSTYLE", "value":"SHX-style"})).unwrap();
+    s.execute("text", &json!({"at":[0,0], "text":"A", "height":10})).unwrap();
+    let d = s.doc().unwrap();
+    let style = d.text_style("SHX-style").unwrap();
+    let t = d.model.iter().find_map(|e| if let EntityKind::Text(t) = &e.kind { Some(t) } else { None }).unwrap();
+    assert_eq!(t.width_factor, style.width_factor);
+    assert_eq!(t.oblique, style.oblique);
 }

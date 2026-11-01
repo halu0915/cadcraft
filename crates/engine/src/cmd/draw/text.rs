@@ -27,6 +27,7 @@ pub(crate) fn justify(j: &str) -> Option<(HAlign, VAlign)> {
 
 pub(crate) fn make_text(s: &Session, at: Vec2, value: &str, height: f64, rotation: f64, j: (HAlign, VAlign)) -> EntityKind {
     let style = s.doc().map(|d| d.header.str("TEXTSTYLE", "Standard")).unwrap_or_else(|_| "Standard".into());
+    let ts = s.doc().ok().and_then(|d| d.text_style(&style)).cloned().unwrap_or_default();
     let (h, v) = j;
     let left = h == HAlign::Left && v == VAlign::Baseline;
     EntityKind::Text(Text {
@@ -35,8 +36,8 @@ pub(crate) fn make_text(s: &Session, at: Vec2, value: &str, height: f64, rotatio
         height,
         value: value.into(),
         rotation,
-        width_factor: 1.0,
-        oblique: 0.0,
+        width_factor: ts.width_factor,
+        oblique: ts.oblique,
         style,
         halign: h,
         valign: v,
