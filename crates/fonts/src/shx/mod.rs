@@ -265,10 +265,39 @@ impl Pair {
                 out.width += g.width * scale * wf;
             } else {
                 resolver::warn("SHX glyph unavailable; using fallback");
-                let mut fallback = crate::shape_stroke(&c.to_string(), h, wf, oblique);
+                // Preserve built-in letter spacing and contextual fallback within a run.
+                // Re-encode decoration flags and literal percent signs for shape_stroke.
+                let mut text = String::new();
+                let mut flags = (false, false);
+                let mut append = |ch, under, over| {
+                    if under != flags.0 {
+                        text.push_str("%%u");
+                    }
+                    if over != flags.1 {
+                        text.push_str("%%o");
+                    }
+                    flags = (under, over);
+                    if ch == '%' {
+                        text.push_str("%%%");
+                    } else {
+                        text.push(ch);
+                    }
+                };
+                append(c, u, o);
+                while let Some(&(next, under, over)) = characters.peek() {
+                    let escape_lead =
+                        self.big.as_ref().is_some_and(|big| next.is_ascii() && big.ranges.iter().any(|(a, b)| (*a..=*b).contains(&(next as u16))));
+                    if escape_lead || crate::bidi::is_format_control(next) || self.glyph(next).is_some() {
+                        break;
+                    }
+                    characters.next();
+                    append(next, under, over);
+                }
+                let mut fallback = crate::shape_stroke(&text, h, wf, oblique);
                 fallback.map(|p| p + Vec2::new(x, 0.0));
                 out.width += fallback.width;
                 out.extend(fallback);
+                continue; // Fallback already contains this run's decorations.
             }
             spans.push((x, out.width, u, o));
         }

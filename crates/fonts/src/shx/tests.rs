@@ -284,3 +284,15 @@ fn invalid_width_uses_positive_default_for_shx_and_fallback() {
         }
     }
 }
+
+#[test]
+fn contiguous_fallback_retains_spacing_controls_and_decorations() {
+    let pair = Pair { regular: Arc::new(font(&[8, 7, 0, 0])), big: None, encoding: Encoding::Big5 };
+    for text in ["BB", "BB%%uB", "%%uBB%%u", "%%%%%%d", "%%oB%%uB"] {
+        let actual = pair.shape(text, 6., 1., 0.);
+        let expected = crate::shape_stroke(text, 6., 1., 0.);
+        assert_eq!(actual.width, expected.width, "{text}");
+        assert_eq!(actual.strokes, expected.strokes, "{text}");
+    }
+    assert!((pair.shape("ABBA", 6., 1., 0.).width - (4.2 + 9.6 + 4.2)).abs() < 1e-9);
+}
