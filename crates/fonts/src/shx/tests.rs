@@ -213,17 +213,55 @@ fn legacy_special_symbols_use_documented_records() {
     let regular = Arc::new(
         Font::parse(&fixture(
             Kind::Shapes,
-            &[(256, &[8, 3, 0, 0]), (257, &[8, 5, 0, 0]), (258, &[8, 7, 0, 0]), (176, &[8, 99, 0, 0]), (177, &[8, 99, 0, 0]), (216, &[8, 99, 0, 0])],
+            &[
+                (127, &[8, 99, 0, 0]),
+                (128, &[8, 99, 0, 0]),
+                (129, &[8, 99, 0, 0]),
+                (256, &[8, 3, 0, 0]),
+                (257, &[8, 5, 0, 0]),
+                (258, &[8, 7, 0, 0]),
+                (176, &[8, 99, 0, 0]),
+                (177, &[8, 99, 0, 0]),
+                (216, &[8, 99, 0, 0]),
+            ],
         ))
         .unwrap(),
     );
     let pair = Pair { regular, big: None, encoding: Encoding::Big5 };
     assert_eq!(pair.shape("%%d%%p%%c", 10., 1., 0.).width, 15.);
     let regular = Arc::new(
-        Font::parse(&fixture(Kind::Unicode, &[(176, &[8, 3, 0, 0]), (177, &[8, 5, 0, 0]), (0x2205, &[8, 7, 0, 0]), (256, &[8, 99, 0, 0])])).unwrap(),
+        Font::parse(&fixture(
+            Kind::Unicode,
+            &[
+                (176, &[8, 3, 0, 0]),
+                (177, &[8, 5, 0, 0]),
+                (0x2205, &[8, 7, 0, 0]),
+                (127, &[8, 99, 0, 0]),
+                (128, &[8, 99, 0, 0]),
+                (129, &[8, 99, 0, 0]),
+                (256, &[8, 99, 0, 0]),
+            ],
+        ))
+        .unwrap(),
     );
     let pair = Pair { regular, big: None, encoding: Encoding::Big5 };
     assert_eq!(pair.shape("%%d%%p%%c", 10., 1., 0.).width, 15.);
+}
+#[test]
+fn legacy_special_symbols_use_127_129() {
+    let regular = Arc::new(
+        Font::parse(&fixture(
+            Kind::Shapes,
+            &[(127, &[8, 3, 0, 0]), (128, &[8, 5, 0, 0]), (129, &[8, 7, 0, 0]), (176, &[8, 99, 0, 0]), (177, &[8, 99, 0, 0]), (216, &[8, 99, 0, 0])],
+        ))
+        .unwrap(),
+    );
+    let pair = Pair { regular, big: None, encoding: Encoding::Big5 };
+    for (text, width) in [("%%d", 3.), ("%%p", 5.), ("%%c", 7.)] {
+        let actual = pair.shape(text, 10., 1., 0.);
+        assert_eq!(actual.width, width, "{text}");
+        assert_eq!(actual.strokes.len(), 1, "{text}");
+    }
 }
 #[test]
 fn rtl_fallback_keeps_whole_line_order_and_context() {

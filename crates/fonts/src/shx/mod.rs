@@ -194,14 +194,14 @@ impl Pair {
             return encoded(&self.regular);
         }
         let legacy_symbol = match c {
-            '°' => Some(256),
-            '±' => Some(257),
-            '⌀' => Some(258),
+            '°' => Some((256, 127)),
+            '±' => Some((257, 128)),
+            '⌀' => Some((258, 129)),
             _ => None,
         };
         if self.regular.kind != Kind::Unicode
-            && let Some(code) = legacy_symbol
-            && self.regular.contains(code)
+            && let Some((reserved, legacy)) = legacy_symbol
+            && let Some(code) = [reserved, legacy].into_iter().find(|code| self.regular.contains(*code))
         {
             return self.regular.glyph(code).ok().map(|g| (g, self.regular.above));
         }
