@@ -55,7 +55,9 @@ impl Piece {
             Piece::Straight(a, b) => {
                 let d = sub3(*b, *a);
                 let l2 = dot3(d, d);
-                if l2 <= f64::EPSILON { 0.0 } else { (dot3(sub3(p, *a), d) / l2).clamp(0.0, 1.0) }
+                // Squared length is not a dimensionless rounding error: short segments
+                // still have a well-defined projection unless their squared length is zero.
+                if l2 == 0.0 { 0.0 } else { (dot3(sub3(p, *a), d) / l2).clamp(0.0, 1.0) }
             }
             Piece::Bulge { arc, ccw, .. } => {
                 let sweep = arc.sweep();

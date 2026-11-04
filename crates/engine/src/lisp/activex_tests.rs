@@ -1127,3 +1127,21 @@ fn a_block_member_cannot_be_renamed_into_a_cycle() {
     ok(&mut s, "(vla-put-Name member \"D\")");
     assert_eq!(ok(&mut s, "(vla-get-Name member)"), "\"D\"");
 }
+
+/// Short nonzero segments must retain interior projections and distance parameters.
+#[test]
+fn tiny_segments_keep_their_projection() {
+    let mut s = session();
+    for length in [1e-8, 1e-10] {
+        let e = line(&mut s, [0.0, 0.0], [length, 0.0]);
+        let mid = length / 2.0;
+        // Normalize before printing/asserting so the usual absolute tolerance cannot hide
+        // the original bug (a zero projection instead of the midpoint).
+        near(&mut s, &format!("(/ (car (vlax-curve-getClosestPointTo {e} '({mid} {length} 0.0))) {length})"), 0.5);
+        near(&mut s, &format!("(/ (vlax-curve-getParamAtPoint {e} '({mid} 0.0 0.0)) {length})"), 0.5);
+        near(&mut s, &format!("(/ (car (vlax-curve-getClosestPointTo {e} '({} 0.0 0.0))) {length})", -length), 0.0);
+        near(&mut s, &format!("(/ (car (vlax-curve-getClosestPointTo {e} '({} 0.0 0.0))) {length})", 2.0 * length), 1.0);
+    }
+    let e = line(&mut s, [0.0, 0.0], [0.0, 0.0]);
+    pt(&mut s, &format!("(vlax-curve-getClosestPointTo {e} '(1.0 1.0 0.0))"), [0.0, 0.0, 0.0]);
+}
