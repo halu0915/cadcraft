@@ -960,7 +960,9 @@ fn z_on(e: &Entity, k: usize, p: Vec2) -> f64 {
     {
         let d = b.xy() - a.xy();
         let l2 = d.x * d.x + d.y * d.y;
-        let t = if l2 <= f64::EPSILON { 0.0 } else { ((p.x - a.x) * d.x + (p.y - a.y) * d.y) / l2 };
+        // A squared length is not a rounding error to compare with EPSILON: only a segment with
+        // no plan extent at all has no height to interpolate along.
+        let t = if l2 == 0.0 { 0.0 } else { ((p.x - a.x) * d.x + (p.y - a.y) * d.y) / l2 };
         return a.z + (b.z - a.z) * t;
     }
     z_at(e, p)
@@ -972,7 +974,9 @@ fn z_at(e: &Entity, p: Vec2) -> f64 {
     let on_line = |a: Vec3, b: Vec3| {
         let d = b.xy() - a.xy();
         let l2 = d.x * d.x + d.y * d.y;
-        let t = if l2 <= f64::EPSILON { 0.0 } else { ((p.x - a.x) * d.x + (p.y - a.y) * d.y) / l2 };
+        // A squared length is not a rounding error to compare with EPSILON: only a segment with
+        // no plan extent at all has no height to interpolate along.
+        let t = if l2 == 0.0 { 0.0 } else { ((p.x - a.x) * d.x + (p.y - a.y) * d.y) / l2 };
         a.z + (b.z - a.z) * t
     };
     match &e.kind {

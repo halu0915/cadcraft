@@ -1145,3 +1145,15 @@ fn tiny_segments_keep_their_projection() {
     let e = line(&mut s, [0.0, 0.0], [0.0, 0.0]);
     pt(&mut s, &format!("(vlax-curve-getClosestPointTo {e} '(1.0 1.0 0.0))"), [0.0, 0.0, 0.0]);
 }
+
+/// A sloped line whose plan extent is tiny still meets a flat line at the interpolated height,
+/// not at its start height.
+#[test]
+fn tiny_plan_extent_keeps_height_interpolation() {
+    let mut s = session();
+    let steep = add(&mut s, EntityKind::Line(Line { a: Vec3::new(0.0, 0.0, 0.0), b: Vec3::new(1e-8, 0.0, 2.0) }));
+    let flat = add(&mut s, EntityKind::Line(Line { a: Vec3::new(5e-9, -1.0, 1.0), b: Vec3::new(5e-9, 1.0, 1.0) }));
+    ok(&mut s, &format!("(setq st (vlax-ename->vla-object {steep}) fl (vlax-ename->vla-object {flat}))"));
+    pt(&mut s, "(vlax-invoke st 'IntersectWith fl acExtendNone)", [5e-9, 0.0, 1.0]);
+    pt(&mut s, "(vlax-invoke fl 'IntersectWith st acExtendNone)", [5e-9, 0.0, 1.0]);
+}
