@@ -66,6 +66,11 @@ pub enum Frame {
         var: Sym,
         body: Value,
     },
+    /// `vlax-for`'s collection was evaluated.
+    VlaxForCollection {
+        var: Sym,
+        body: Value,
+    },
     Foreach {
         var: Sym,
         items: Value,
@@ -111,6 +116,8 @@ pub enum Special {
     Or,
     Defun,
     Lambda,
+    /// `(vlax-for var collection body…)`: `foreach` over an ActiveX collection.
+    VlaxFor,
 }
 
 /// What a built-in asks of the machine.
@@ -163,7 +170,8 @@ pub struct Ctx<'a> {
 pub const MAX_STACK: usize = 100_000;
 /// Nesting depth of synchronous callbacks (`vl-sort` comparing with a LISP function, …).
 const MAX_SYNC_DEPTH: usize = 32;
-
+/// Steps per slice while driving a synchronous callback ([`Ctx::call_sync`]).
+const SYNC_SLICE: u64 = 400_000;
 enum State {
     Eval(Value),
     Ret(Value),
@@ -355,6 +363,11 @@ impl Machine {
                 let saved = ctx.env.globals.get(&var).cloned();
                 self.foreach(ctx, var, v, body, saved, Value::Nil);
             }
+            Frame::VlaxForCollection { var, body } => {
+                let items = Value::list(super::activex::collection_items(ctx, &v)?);
+                let saved = ctx.env.globals.get(&var).cloned();
+                self.foreach(ctx, var, items, body, saved, Value::Nil);
+            }
             Frame::Foreach { var, items, body, saved } => self.foreach(ctx, var, items, body, saved, v),
             Frame::Unbind { saved } => {
                 restore(ctx.env, saved);
@@ -500,6 +513,11 @@ impl Machine {
                 self.stack.push(Frame::ForeachList { var, body: args.cdr().cdr() });
                 self.state = State::Eval(args.cdr().car());
             }
+            Special::VlaxFor => {
+                let Value::Sym(var) = args.car() else { return Err(LispError::bad_arg("symbolp", &args.car())) };
+                self.stack.push(Frame::VlaxForCollection { var, body: args.cdr().cdr() });
+                self.state = State::Eval(args.cdr().car());
+            }
             Special::Progn => self.progn(args, Value::Nil),
             Special::And => self.and_or(args, true),
             Special::Or => self.and_or(args, false),
@@ -525,6 +543,13 @@ impl Machine {
                 }
                 BuiltinKind::Ctx(func) => {
                     let flow = func(ctx, args)?;
+                    if let Flow::Value(v) = &flow {
+                        super::value::charge_result(v)?;
+                    }
+                    self.flow(flow);
+                }
+                BuiltinKind::Named(func) => {
+                    let flow = func(ctx, b.name, args)?;
                     if let Flow::Value(v) = &flow {
                         super::value::charge_result(v)?;
                     }
@@ -645,12 +670,31 @@ impl Ctx<'_> {
             super::value::charge_result(&v)?;
             return Ok(v);
         }
+        let cap = self.s.lisp.limits.callback_steps;
         let mut m = Machine::calling(f.clone(), args);
         let mut sub = Ctx { s: &mut *self.s, env: &mut *self.env, depth: self.depth + 1 };
-        match m.run(&mut sub, u64::MAX) {
-            Outcome::Done(v) => Ok(v),
-            Outcome::Error(e) => Err(e),
-            Outcome::Wait(_) => Err(LispError::new("this function can't ask for input here")),
+        // Drive the callback in bounded slices instead of granting it `u64::MAX` fuel. A `Yield`
+        // (the step budget ran out) is retried until a hard cap, so a constant-memory infinite
+        // loop inside a comparator or predicate terminates with an error rather than hanging the
+        // thread and bypassing the blocking execution cap (CWE-400).
+        let mut spent: u64 = 0;
+        loop {
+            let remaining = cap.saturating_sub(spent);
+            if remaining == 0 {
+                return Err(LispError::new(format!("callback stopped after {cap} steps")));
+            }
+            let slice = remaining.min(SYNC_SLICE);
+            match m.run(&mut sub, slice) {
+                Outcome::Done(v) => return Ok(v),
+                Outcome::Error(e) => return Err(e),
+                Outcome::Wait(Need::Yield) => {
+                    spent = spent.saturating_add(slice);
+                    if spent >= cap {
+                        return Err(LispError::new(format!("callback stopped after {cap} steps")));
+                    }
+                }
+                Outcome::Wait(_) => return Err(LispError::new("this function can't ask for input here")),
+            }
         }
     }
 }

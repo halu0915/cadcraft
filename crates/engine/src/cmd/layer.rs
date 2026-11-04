@@ -7,7 +7,8 @@ use cadcraft_doc::{Layer, Lineweight};
 use serde_json::{Value, json};
 
 use super::machines::SelectRun;
-use super::*;
+use super::{CommandSpec, bad, bool_or, ok, str_param, targets};
+
 use crate::{Result, Session};
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -40,7 +41,9 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("layoff", "Layer Off", |s, p| set_obj_layers(s, p, |l| l.on = false))
             .menu(&["Format", "Layer Tools", "Layer Off"])
             .params("{handles?}")
-            .interactive(|_| Ok(Box::new(SelectRun::single("layoff", "LAYOFF", "Select an object on the layer to be turned off")))),
+            // Layer Off stays active until Enter or Esc, as in AutoCAD (#1418): one object per
+            // pick and the prompt comes straight back.
+            .interactive(|_| Ok(Box::new(SelectRun::repeat("layoff", "LAYOFF", "Select an object on the layer to be turned off")))),
         CommandSpec::new("laylck", "Lock Layer", |s, p| set_obj_layers(s, p, |l| l.locked = true))
             .menu(&["Format", "Layer Tools", "Lock Layer"])
             .params("{handles?}")
@@ -178,7 +181,7 @@ fn loaded_linetype(d: &cadcraft_doc::Drawing, cmd: &str, p: &Value) -> Result<Op
     Ok(Some(t.name.clone()))
 }
 
-fn valid_name(n: &str) -> bool {
+pub(crate) fn valid_name(n: &str) -> bool {
     !n.trim().is_empty() && n.len() <= 255 && !n.chars().any(|c| "<>/\\\":;?*|,=`".contains(c))
 }
 
