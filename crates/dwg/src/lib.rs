@@ -391,6 +391,7 @@ mod native {
         table_cell_heights(doc);
         table_style_rows(doc, false);
         keep_sort_handles(doc);
+        wipeout_closures(doc, true);
         drop_orphaned_dgn_components(doc)
     }
 
@@ -695,6 +696,31 @@ mod native {
     /// common dimension data), which acadrust keeps no copy of from DXF: it is set here as
     /// CADCraft's DXF writer always sets it (#1094). Bit 0, the opposite of group 70's bit 128,
     /// acadrust 0.6.6 reads and writes itself.
+    /// A polygonal wipeout's clip boundary as each format keeps it: a DXF repeats the first
+    /// vertex at the end (CADCraft's writer does, as other programs' DXF does), a DWG keeps each
+    /// vertex once (AutoCAD's own DWG wipeouts store four corners for a rectangle, the reader
+    /// closes the polygon). `closed`: repeat the first vertex, for the DXF read from a DWG;
+    /// otherwise leave the repeat out, for the DWG written from a DXF. Kept, the repeat went into
+    /// the DWG as a zero-length edge: AutoCAD opened such a drawing as needing recovery, and its
+    /// RECOVER erased all 74 wipeouts of a CADCraft-saved plan (with 38 ellipses, the 112 objects
+    /// it erased). A boundary of fewer than three distinct vertices is left as it is.
+    fn wipeout_closures(doc: &mut acadrust::CadDocument, closed: bool) {
+        for e in doc.entities_mut() {
+            let acadrust::entities::EntityType::Wipeout(w) = e else { continue };
+            if w.clip_type != acadrust::entities::WipeoutClipType::Polygonal {
+                continue;
+            }
+            let v = &mut w.clip_boundary_vertices;
+            let repeated = v.len() > 3 && v.first() == v.last();
+            if !closed && repeated {
+                v.pop();
+            } else if closed && !repeated && v.len() >= 3 && v.first() != v.last() {
+                let first = v.first().copied();
+                v.extend(first);
+            }
+        }
+    }
+
     fn dimension_flags(doc: &mut acadrust::CadDocument) {
         for e in doc.entities_mut() {
             let acadrust::entities::EntityType::Dimension(d) = e else { continue };
@@ -1227,6 +1253,7 @@ mod native {
             other_layout_owners(&mut doc);
             table_style_rows(&mut doc, true);
             dimension_flags(&mut doc);
+            wipeout_closures(&mut doc, false);
             let mut unwritten = drop_unwritable(&mut doc);
             for (kind, n) in proxies {
                 let total = unwritten.entry(kind).or_insert(0);
@@ -2084,6 +2111,44 @@ mod tests {
                 })
                 .collect();
             assert_eq!(frames, [vec![0xDE, 0xAD, 0xBE, 0xEF]], "{version}");
+        }
+    }
+
+    /// A polygonal wipeout's DXF boundary repeats its first vertex; the DWG keeps each vertex
+    /// once, as AutoCAD's own DWG wipeouts do (AutoCAD's RECOVER erased wipeouts that kept the
+    /// repeat). A triangle written with its repeat (4 vertices) keeps 3; a rectangular clip and
+    /// an open polygon are written as they are.
+    #[cfg(not(no_dwg_bridge))]
+    #[test]
+    fn wipeout_boundaries_leave_out_the_repeated_closing_vertex() {
+        let wipeout = |clip: u8, points: &[(f64, f64)]| {
+            let mut s = format!(
+                "  0\nWIPEOUT\n  8\n0\n100\nAcDbEntity\n100\nAcDbWipeout\n 90\n0\n 10\n0\n 20\n0\n 30\n0\n 11\n100\n 21\n0\n 31\n0\n 12\n0\n 22\n40\n 32\n0\n 13\n1\n 23\n1\n 70\n7\n280\n1\n281\n50\n282\n50\n283\n0\n 71\n{clip}\n 91\n{}\n",
+                points.len()
+            );
+            for (x, y) in points {
+                s.push_str(&format!(" 14\n{x}\n 24\n{y}\n"));
+            }
+            s
+        };
+        let closed = [(-0.5, 0.5), (0.5, 0.5), (0.0, -0.5), (-0.5, 0.5)];
+        let square = [(-0.5, 0.5), (0.5, 0.5), (0.5, -0.5), (-0.5, -0.5)];
+        let rect = [(-0.5, -0.5), (0.5, 0.5)];
+        let entities = [wipeout(2, &closed), wipeout(2, &square), wipeout(1, &rect)].concat();
+        let dxf = format!(
+            "  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1032\n  0\nENDSEC\n  0\nSECTION\n  2\nENTITIES\n{entities}  0\nENDSEC\n  0\nEOF\n"
+        );
+        for version in ["AC1018", "AC1027", "AC1032"] {
+            let dwg = dxf_to_dwg_as(dxf.as_bytes(), version).unwrap();
+            let back = acadrust::DwgReader::from_stream(std::io::Cursor::new(dwg)).read().unwrap();
+            let counts: Vec<usize> = back
+                .entities()
+                .filter_map(|e| match e {
+                    acadrust::entities::EntityType::Wipeout(w) => Some(w.clip_boundary_vertices.len()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(counts, [3, 4, 2], "{version}");
         }
     }
 }

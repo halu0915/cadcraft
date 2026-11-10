@@ -144,6 +144,9 @@ fn write_basic_entity(w: &mut W, d: &Drawing, e: &Entity, owner: &str, paper: bo
             common(w, e, owner, paper, "AcDbEllipse");
             w.p(10, el.center);
             w.p(11, el.major);
+            if let Some(n) = ellipse_normal(e.common.extrusion, el.major) {
+                w.p(210, n);
+            }
             w.f(40, el.ratio);
             w.f(41, el.start);
             w.f(42, el.end);
@@ -849,6 +852,27 @@ fn extrusion(w: &mut W, e: &Entity) {
     if n != Vec3::Z {
         w.p(210, n);
     }
+}
+
+/// The normal (210) of an ELLIPSE with major axis `major`, when it is not the Z axis: the
+/// extrusion read with it, or Z for a mirrored one (the reader already turned its parameters into
+/// the XY plane's), less its part along the major axis. A DWG stores the normal and the major axis
+/// separately and AutoCAD erases an ellipse whose normal isn't perpendicular to its major axis
+/// (RECOVER): a block's circles drawn on a slightly tilted plane kept a major axis with a tiny Z
+/// while the normal was written as exactly Z.
+fn ellipse_normal(extrusion: Vec3, major: Vec3) -> Option<Vec3> {
+    let n = if extrusion.is_finite() && extrusion.z > 0.0 { extrusion.normalized() } else { Vec3::Z };
+    let m = major.dot(major);
+    if !m.is_finite() || m == 0.0 || !n.is_finite() || n.z <= 0.0 {
+        return None;
+    }
+    let n = n - major * (n.dot(major) / m);
+    let len = n.len();
+    if !len.is_finite() || len == 0.0 {
+        return None;
+    }
+    let n = Vec3::new(n.x / len, n.y / len, n.z / len);
+    (n.is_finite() && n.z > 0.0 && n != Vec3::Z).then_some(n)
 }
 
 /// Hatch origin and background colour as `CADCRAFT` xdata: `1000 HATCH`, the origin as a
