@@ -1249,10 +1249,15 @@ mod native {
                 Some(source) if doc.version >= acadrust::DxfVersion::AC1027 => super::proxy_transport::restore_classes(&mut doc, source),
                 _ => None,
             };
-            let proxies = match restored {
+            let mut proxies = match restored {
                 Some((objects, entities)) => left_out(objects, entities),
                 None => proxy_classes(&mut doc, classes.as_deref()),
             };
+            // After the classes and the proxies' class numbers are the DWG's.
+            for (kind, n) in left_out(super::proxy_transport::drop_objects_of_entity_classes(&mut doc), 0) {
+                let total = proxies.entry(kind).or_insert(0);
+                *total = total.saturating_add(n);
+            }
             other_layout_owners(&mut doc);
             table_style_rows(&mut doc, true);
             dimension_flags(&mut doc);
@@ -1428,6 +1433,44 @@ mod native {
     }
 
     #[cfg(test)]
+    /// A proxy object that names an entity class is left out of the DWG, with the dictionary entry
+    /// that named it, and reported: AutoCAD doesn't open a drawing with one. CADCraft 0.17.0 wrote
+    /// such drawings (an AutoLISP application's object came back naming a block grip entity
+    /// class). A proxy object of an object class beside it is kept, with its data.
+    #[cfg(not(no_dwg_bridge))]
+    #[test]
+    fn a_proxy_object_of_an_entity_class_is_left_out() {
+        use acadrust::objects::ObjectType;
+        let class = |name: &str, entity: u8| format!("  0\nCLASS\n  1\n{name}\n  2\nAcme{name}\n  3\nAcme\n 90\n0\n 91\n1\n280\n0\n281\n{entity}\n");
+        let proxy = |handle: &str, class: u16| {
+            format!(
+                "  0\nACAD_PROXY_OBJECT\n  5\n{handle}\n330\nC\n100\nAcDbProxyObject\n 90\n499\n 91\n{class}\n 71\n33\n 97\n0\n 70\n0\n161\n18\n310\n5A3CC0\n 94\n0\n"
+            )
+        };
+        let dictionary = "  0\nDICTIONARY\n  5\nC\n330\n0\n100\nAcDbDictionary\n281\n1\n  3\nACME_STORE\n350\n2B\n  3\nACME_STRAY\n350\n2C\n";
+        let dxf = format!(
+            "  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1032\n  0\nENDSEC\n  0\nSECTION\n  2\nCLASSES\n{}{}  0\nENDSEC\n  0\nSECTION\n  2\nOBJECTS\n{dictionary}{}{}  0\nENDSEC\n  0\nEOF\n",
+            class("STORE", 0),
+            class("GRIP", 1),
+            proxy("2B", 500),
+            proxy("2C", 501),
+        );
+        for version in ["AC1027", "AC1032"] {
+            let (dwg, unwritten) = dxf_to_dwg_noted(dxf.as_bytes(), version).unwrap();
+            assert_eq!(unwritten, [("ACAD_PROXY_OBJECT".to_string(), 1)].into_iter().collect::<crate::Unwritten>(), "{version}");
+            let doc = acadrust::DwgReader::from_stream(std::io::Cursor::new(dwg)).read().unwrap();
+            let Some(ObjectType::ProxyObject(kept)) = doc.objects.get(&acadrust::Handle::from(0x2Bu64)) else {
+                panic!("{version}: the object's proxy")
+            };
+            assert_eq!((kept.payload.bit_count, kept.payload.data()), (18, vec![0x5A, 0x3C, 0xC0]), "{version}");
+            let class = doc.classes.iter().find(|c| i32::from(c.class_number) == kept.class_id).unwrap();
+            assert_eq!((class.dxf_name.as_str(), class.is_an_entity), ("STORE", false), "{version}");
+            assert!(!doc.objects.contains_key(&acadrust::Handle::from(0x2Cu64)), "{version}: the entity class's proxy object");
+            let Some(ObjectType::Dictionary(root)) = doc.objects.get(&acadrust::Handle::from(0x0Cu64)) else { panic!("{version}: the dictionary") };
+            let keys: Vec<&str> = root.entries.iter().map(|(k, _)| k.as_str()).collect();
+            assert!(keys.contains(&"ACME_STORE") && !keys.contains(&"ACME_STRAY"), "{version}: {keys:?}");
+        }
+    }
     mod application_object_tests {
         use super::*;
         use acadrust::CadDocument;

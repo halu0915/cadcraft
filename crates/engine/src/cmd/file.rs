@@ -808,8 +808,9 @@ pub fn not_saved_as(d: &Drawing, version: Version) -> std::collections::BTreeMap
     }
     // Another program's proxy objects (in the OBJECTS section) follow the same rule as its proxy
     // entities: the DWG writer leaves them out before 2013, or when their class can't be named.
+    // It also leaves out one that names an entity class (AutoCAD doesn't open a drawing with one).
     for o in d.foreign.objects.iter().filter(|o| o.kind.eq_ignore_ascii_case("ACAD_PROXY_OBJECT")) {
-        if version < Version::R2013 || d.foreign.proxy_class(&o.tags).is_none() {
+        if version < Version::R2013 || d.foreign.proxy_class(&o.tags).is_none() || d.foreign.proxy_class_is_entity(&o.tags) {
             let n = out.entry("ACAD_PROXY_OBJECT".to_string()).or_insert(0);
             *n = n.saturating_add(1);
         }

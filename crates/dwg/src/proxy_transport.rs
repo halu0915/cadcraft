@@ -327,6 +327,40 @@ pub(super) fn restore_classes(doc: &mut CadDocument, classes: Vec<DxfClass>) -> 
     Some((objects.len(), entities.len()))
 }
 
+/// Leave out each proxy object whose class is an entity's. A proxy object holds a database object
+/// of a class that isn't loaded, and AutoCAD refuses the whole drawing (it doesn't open, with
+/// nothing to audit) when one names an entity class. CADCraft 0.17.0 wrote such DWGs: a proxy
+/// kept its DXF class number in a DWG that numbered the classes differently, so an AutoLISP
+/// application's object named a block grip or PDF underlay entity class, and the drawing read back
+/// and saved again carried the wrong class on. Which class the object was is not in such a file,
+/// so it can't be written as it was; the dictionary entries that named it go with it. `doc`'s
+/// classes and its proxies' class numbers are the DWG's by now (after [`restore_classes`] or the
+/// match by name). Returns how many were left out.
+pub(super) fn drop_objects_of_entity_classes(doc: &mut CadDocument) -> usize {
+    let entity_classes: HashSet<i32> = doc.classes.iter().filter(|c| c.is_an_entity).map(|c| i32::from(c.class_number)).collect();
+    let gone: HashSet<_> = doc
+        .objects
+        .iter()
+        .filter_map(|(handle, object)| match object {
+            ObjectType::ProxyObject(p) if entity_classes.contains(&p.class_id) => Some(*handle),
+            _ => None,
+        })
+        .collect();
+    if gone.is_empty() {
+        return 0;
+    }
+    doc.objects.retain(|handle, _| !gone.contains(handle));
+    for object in doc.objects.values_mut() {
+        let ObjectType::Dictionary(d) = object else { continue };
+        if d.entries.iter().any(|(_, e)| gone.contains(e)) {
+            d.entries.retain(|(_, e)| !gone.contains(e));
+            let keys: HashSet<&str> = d.entries.iter().map(|(k, _)| k.as_str()).collect();
+            d.hard_owner_entries.retain(|k| keys.contains(k.as_str()));
+        }
+    }
+    gone.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
