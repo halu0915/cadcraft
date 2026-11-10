@@ -71,3 +71,18 @@ fn layer_commands_reject_unloaded_linetypes_and_duplicate_renames() {
     s.execute("layer.set", &json!({ "name": "A", "newName": "a", "linetype": "continuous" })).unwrap();
     assert_eq!(s.doc().unwrap().layer("a").unwrap().linetype, "Continuous");
 }
+
+#[test]
+fn state_option_saves_restores_and_deletes_layer_states() {
+    let mut s = Session::new();
+    s.script("-LAYER N A\nA S 送審\n\nOFF A\nA ? R 送審 D nope\n\n\n").unwrap();
+    assert!(s.running.is_none(), "{}", s.prompt_text());
+    let d = s.doc().unwrap();
+    assert_eq!(d.layer_states.iter().map(|st| st.name.as_str()).collect::<Vec<_>>(), ["送審"]);
+    assert!(d.layer("A").unwrap().on, "restoring 送審 turned A back on: {:?}", s.log);
+    assert!(s.log.iter().any(|l| l.contains("Cannot find layer state \"nope\"")), "{:?}", s.log);
+    // Delete, and names match without regard to case; an invalid name is refused.
+    s.script("-LAYER A D 送審\nS bad*name\n\n\n\n").unwrap();
+    assert!(s.doc().unwrap().layer_states.is_empty(), "{:?}", s.log);
+    assert!(s.execute("layerstate.save", &json!({ "name": "a|b" })).is_err());
+}

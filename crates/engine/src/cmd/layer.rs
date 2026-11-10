@@ -397,10 +397,14 @@ fn all_layers(s: &mut Session, f: fn(&mut Layer)) -> Result<Value> {
 
 fn run_state_save(s: &mut Session, p: &Value) -> Result<Value> {
     let name = str_param(p, "name").ok_or_else(|| bad("layerstate.save", "`name` is required"))?.to_string();
+    // The name becomes a dictionary key in the saved file (ACAD_LAYERSTATES).
+    if !valid_name(&name) {
+        return Err(bad("layerstate.save", "invalid name"));
+    }
     let d = s.doc_mut()?;
     let layers = d.layers.clone();
     d.layer_states.retain(|st| st.name != name);
-    d.layer_states.push(cadcraft_doc::LayerState { name, layers });
+    d.layer_states.push(cadcraft_doc::LayerState::new(name, layers));
     ok()
 }
 
@@ -408,22 +412,23 @@ fn run_state_restore(s: &mut Session, p: &Value) -> Result<Value> {
     let name = str_param(p, "name").ok_or_else(|| bad("layerstate.restore", "`name` is required"))?;
     let d = s.doc_mut()?;
     let st = d.layer_states.iter().find(|st| st.name == name).cloned().ok_or_else(|| bad("layerstate.restore", "no such layer state"))?;
-    restore_layers(d, st.layers);
+    restore_layers(d, &st);
     ok()
 }
 
-/// Put the saved layers back over the drawing's layers of the same name (without regard to case);
-/// saved layers the drawing no longer has are skipped. Both lists can come from a file, so the
-/// drawing's layers are looked up in an index rather than scanned per saved layer.
-pub(crate) fn restore_layers(d: &mut cadcraft_doc::Drawing, saved: Vec<Layer>) {
+/// Put a state's saved layers back over the drawing's layers of the same name (without regard to
+/// case), setting the properties the state saves (its mask); saved layers the drawing no longer
+/// has are skipped. Both lists can come from a file, so the drawing's layers are looked up in an
+/// index rather than scanned per saved layer.
+pub(crate) fn restore_layers(d: &mut cadcraft_doc::Drawing, state: &cadcraft_doc::LayerState) {
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::with_capacity(d.layers.len());
     for (i, l) in d.layers.iter().enumerate() {
         // The first of names that differ only in case, as `Drawing::layer_mut` finds it.
         index.entry(l.name.to_ascii_lowercase()).or_insert(i);
     }
-    for layer in saved {
+    for layer in &state.layers {
         if let Some(l) = index.get(&layer.name.to_ascii_lowercase()).and_then(|&i| d.layers.get_mut(i)) {
-            *l = layer;
+            *l = state.apply(l, layer);
         }
     }
 }
@@ -483,10 +488,30 @@ mod tests {
         back.frozen = true;
         saved.push(back);
         let started = std::time::Instant::now();
-        super::restore_layers(&mut d, saved);
+        super::restore_layers(&mut d, &cadcraft_doc::LayerState::new("s", saved));
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
         assert!(d.layer("L7").is_some_and(|l| l.frozen));
         assert_eq!(d.layers.len(), 20_000);
+    }
+
+    /// A state that saves only some properties (one from AutoCAD) restores only those, and never
+    /// a layer's description.
+    #[test]
+    fn restore_sets_only_the_saved_properties() {
+        let mut d = cadcraft_doc::Drawing::new_imperial();
+        let mut now = cadcraft_doc::Layer::new("A");
+        now.description = "now".into();
+        d.layers.push(now);
+        let mut saved = cadcraft_doc::Layer::new("A");
+        (saved.on, saved.color, saved.description) = (false, cadcraft_color::Color::Index(3), "then".into());
+        let mut st = cadcraft_doc::LayerState::new("s", vec![saved]);
+        st.mask = cadcraft_doc::LayerState::COLOR;
+        super::restore_layers(&mut d, &st);
+        let a = d.layer("A").unwrap();
+        assert_eq!((a.on, a.color, a.description.as_str()), (true, cadcraft_color::Color::Index(3), "now"));
+        st.mask = cadcraft_doc::LayerState::ALL;
+        super::restore_layers(&mut d, &st);
+        assert!(!d.layer("A").unwrap().on);
     }
 
     #[test]

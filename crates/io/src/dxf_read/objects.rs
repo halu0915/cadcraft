@@ -208,9 +208,20 @@ impl Objects {
         if let Some(p) = self.xrecord_text(crate::dxf_ext::ANNOTATION_KEY).and_then(|t| crate::dxf_ext::parse_anno(&t)) {
             crate::dxf_ext::apply_anno(d, p);
         }
-        // Saved layer states.
-        if let Some(states) = self.xrecord_text(crate::dxf_ext::LAYER_STATES_KEY).and_then(|t| crate::dxf_ext::parse_layer_states(&t)) {
-            d.layer_states = states;
+        // Saved layer states: AutoCAD's (ACAD_LAYERSTATES) when the file has them, with what only
+        // CADCraft's record holds; a CADCraft record from before it wrote AutoCAD's adds its own.
+        let ours = self.xrecord_text(crate::dxf_ext::LAYER_STATES_KEY).and_then(|t| crate::dxf_ext::parse_layer_states(&t));
+        let (version, ours) = ours.unwrap_or((2, Vec::new()));
+        match crate::dxf_layer_states::read(d, &self.names, &self.xrecords, &rx.ltypes, &ours) {
+            Some(mut states) => {
+                if version == 1 {
+                    let extra: Vec<_> = ours.into_iter().filter(|s| !states.iter().any(|n| n.name.eq_ignore_ascii_case(&s.name))).collect();
+                    states.extend(extra);
+                }
+                d.layer_states = states;
+            }
+            None if !ours.is_empty() => d.layer_states = ours,
+            None => {}
         }
         // The drawing's plot style tables.
         if let Some(tables) = self.xrecord_text(crate::dxf_ext::PLOT_STYLES_KEY).and_then(|t| crate::dxf_ext::parse_plot_styles(&t)) {

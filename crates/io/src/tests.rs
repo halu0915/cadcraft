@@ -1826,12 +1826,12 @@ fn layer_states_roundtrip_next_to_constraints() {
         description: "walls \\ hidden".into(),
         ..Layer::default()
     });
-    d.layer_states.push(LayerState { name: "Plot".into(), layers: d.layers.clone() });
+    d.layer_states.push(LayerState::new("Plot", d.layers.clone()));
     let mut off = d.layers.clone();
     for l in &mut off {
         (l.on, l.frozen, l.locked, l.plot) = (false, true, true, false);
     }
-    d.layer_states.push(LayerState { name: "All off".into(), layers: off });
+    d.layer_states.push(LayerState::new("All off", off));
     let text = write_dxf(&d);
     assert!(text.contains("CADCRAFT_LAYERSTATES"));
     let back = read_dxf(text.as_bytes()).unwrap();
@@ -1842,6 +1842,158 @@ fn layer_states_roundtrip_next_to_constraints() {
     assert_eq!(read(&write(&d, "x.dwg").unwrap(), "x.dwg").unwrap().layer_states, d.layer_states);
     // Drawings without saved layer states carry no record.
     assert!(!write_dxf(&Drawing::new_imperial()).contains("CADCRAFT_LAYERSTATES"));
+}
+
+/// The groups of the record of `tags` whose handle (group 5) is `h`.
+fn record_by_handle<'a>(tags: &'a [cadcraft_dxf::Tag], h: &str) -> &'a [cadcraft_dxf::Tag] {
+    let at = tags.windows(2).position(|w| w[0].code == 0 && w[1].code == 5 && w[1].str() == h).expect("record");
+    let end = tags.iter().skip(at + 1).position(|t| t.code == 0).map_or(tags.len(), |p| at + 1 + p);
+    &tags[at..end]
+}
+
+/// The handle a dictionary record names for `key`.
+fn dict_entry(dict: &[cadcraft_dxf::Tag], key: &str) -> Option<String> {
+    dict.windows(2).find(|w| w[0].code == 3 && w[0].str() == key && matches!(w[1].code, 350 | 360)).map(|w| w[1].str())
+}
+
+/// The DXF of `d` without CADCraft's own layer state record, as another program writes it.
+fn without_cadcraft_layer_states(d: &Drawing) -> String {
+    let tags = cadcraft_dxf::parse(write_dxf(d).as_bytes()).unwrap();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(t) = tags.get(i) {
+        if t.code == 3 && t.str() == "CADCRAFT_LAYERSTATES" {
+            i += 2;
+            continue;
+        }
+        out.push(t.clone());
+        i += 1;
+    }
+    cadcraft_dxf::write_ascii(&out)
+}
+
+fn layer_state_sample() -> Drawing {
+    let mut d = Drawing::new_imperial();
+    d.linetypes.push(Linetype { name: "DASHED".into(), description: "Dashed".into(), pattern: Vec::new() });
+    d.layers.push(Layer {
+        name: "牆".into(),
+        color: Color::Index(1),
+        linetype: "DASHED".into(),
+        lineweight: Lineweight::Mm100(35),
+        ..Layer::default()
+    });
+    d.layers.push(Layer { name: "Notes".into(), transparency: 50, plot: false, ..Layer::default() });
+    d.layer_states.push(LayerState::new("送審", d.layers.clone()));
+    let mut site = d.layers.clone();
+    for l in site.iter_mut().filter(|l| l.name != "0") {
+        (l.on, l.frozen, l.locked, l.vp_freeze_new) = (false, true, true, true);
+        l.color = Color::Index(5);
+    }
+    d.layer_states.push(LayerState { description: "site".into(), ..LayerState::new("施工", site) });
+    d
+}
+
+#[test]
+fn layer_states_are_written_where_autocad_reads_them() {
+    let d = layer_state_sample();
+    let tags = cadcraft_dxf::parse(write_dxf(&d).as_bytes()).unwrap();
+    // The LAYER table's extension dictionary holds ACAD_LAYERSTATES, one XRECORD per state.
+    let table = tags.windows(2).position(|w| w[0].code == 0 && w[0].str() == "TABLE" && w[1].code == 2 && w[1].str() == "LAYER").unwrap();
+    let xd = tags[table..].windows(2).find(|w| w[0].code == 102 && w[0].str() == "{ACAD_XDICTIONARY").map(|w| w[1].str()).unwrap();
+    let states = dict_entry(record_by_handle(&tags, &xd), "ACAD_LAYERSTATES").expect("ACAD_LAYERSTATES entry");
+    let states = record_by_handle(&tags, &states);
+    let site = record_by_handle(&tags, &dict_entry(states, "施工").expect("state 施工"));
+    assert!(dict_entry(states, "送審").is_some());
+    let g = |code: i32| site.iter().find(|t| t.code == code).map(|t| t.str());
+    assert_eq!((g(91), g(301)), (Some("2047".into()), Some("site".into())));
+    // 牆: off 1 | frozen 2 | locked 4 | plottable 8 | frozen in new viewports 16; colour 5,
+    // lineweight 0.35 mm, DASHED by its LTYPE handle.
+    let wall = site.iter().position(|t| t.code == 8 && t.str() == "牆").unwrap();
+    let after = |code: i32| site[wall..].iter().find(|t| t.code == code).map(|t| t.str()).unwrap();
+    assert_eq!((after(90), after(62), after(370)), ("31".into(), "5".into(), "35".into()));
+    let name = tags.iter().position(|t| t.code == 2 && t.str() == "DASHED").unwrap();
+    let start = tags[..name].iter().rposition(|t| t.code == 0).unwrap();
+    assert_eq!((tags[start].str(), tags[start + 1].code), ("LTYPE".into(), 5));
+    assert_eq!(after(331), tags[start + 1].str());
+    // No handle is used twice, and $HANDSEED is past them all.
+    let seed_at = tags.windows(2).position(|w| w[0].code == 9 && w[0].str() == "$HANDSEED").unwrap() + 1;
+    let handles: Vec<u64> = tags
+        .iter()
+        .enumerate()
+        .filter(|(i, t)| t.code == 5 && *i != seed_at)
+        .map(|(_, t)| t)
+        .filter_map(|t| u64::from_str_radix(&t.str(), 16).ok())
+        .collect();
+    let unique: std::collections::HashSet<u64> = handles.iter().copied().collect();
+    assert_eq!(unique.len(), handles.len(), "a handle is used twice");
+    let seed = tags.windows(2).find(|w| w[0].code == 9 && w[0].str() == "$HANDSEED").map(|w| u64::from_str_radix(&w[1].str(), 16).unwrap()).unwrap();
+    assert!(handles.iter().all(|h| *h < seed));
+}
+
+#[test]
+fn autocad_layer_states_are_read() {
+    let d = layer_state_sample();
+    // A file with only AutoCAD's record: the states read back with every property it holds.
+    let back = read_dxf(without_cadcraft_layer_states(&d).as_bytes()).unwrap();
+    assert_eq!(back.layer_states.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["送審", "施工"]);
+    assert_eq!(back.layer_states, d.layer_states);
+    // Saved again, it still holds them, once (the kept dictionary is not written twice).
+    let again = roundtrip(&back);
+    assert_eq!(again.layer_states, d.layer_states);
+    assert_eq!(write_dxf(&again).matches("ACAD_LAYERSTATES").count(), 1);
+    #[cfg(not(target_arch = "wasm32"))]
+    assert_eq!(read(&write(&back, "x.dwg").unwrap(), "x.dwg").unwrap().layer_states, d.layer_states);
+}
+
+#[test]
+fn layer_states_follow_autocad_edits() {
+    let d = layer_state_sample();
+    // Another program deleted 施工 from ACAD_LAYERSTATES: CADCraft's record (version 2) doesn't
+    // bring it back.
+    let mut tags = cadcraft_dxf::parse(write_dxf(&d).as_bytes()).unwrap();
+    let at = tags.iter().position(|t| t.code == 3 && t.str() == "施工").unwrap();
+    tags.drain(at..at + 2);
+    let back = read_dxf(cadcraft_dxf::write_ascii(&tags).as_bytes()).unwrap();
+    assert_eq!(back.layer_states.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["送審"]);
+    // A file from a CADCraft version that wrote only its own record (version 1), next to
+    // AutoCAD's states, keeps both.
+    let mut native = d.clone();
+    native.layer_states.truncate(1);
+    let mut tags = cadcraft_dxf::parse(without_cadcraft_layer_states(&native).as_bytes()).unwrap();
+    let old = serde_json::json!({ "version": 1, "states": [d.layer_states[1]] }).to_string();
+    let root = tags.iter().position(|t| t.code == 3 && t.str() == "ACAD_GROUP").unwrap();
+    let root_h = tags[..root].iter().rev().find(|t| t.code == 5).unwrap().str();
+    tags.splice(root..root, [cadcraft_dxf::Tag::s(3, "CADCRAFT_LAYERSTATES"), cadcraft_dxf::Tag::s(350, "FFFF0")]);
+    let end = tags.iter().rposition(|t| t.code == 0 && t.str() == "ENDSEC").unwrap();
+    tags.splice(
+        end..end,
+        [
+            cadcraft_dxf::Tag::s(0, "XRECORD"),
+            cadcraft_dxf::Tag::s(5, "FFFF0"),
+            cadcraft_dxf::Tag::s(330, root_h),
+            cadcraft_dxf::Tag::s(100, "AcDbXrecord"),
+            cadcraft_dxf::Tag::i(280, 1),
+            cadcraft_dxf::Tag::s(1, old),
+        ],
+    );
+    let back = read_dxf(cadcraft_dxf::write_ascii(&tags).as_bytes()).unwrap();
+    assert_eq!(back.layer_states, d.layer_states);
+}
+
+#[test]
+fn hostile_layer_state_records_do_not_panic() {
+    let d = layer_state_sample();
+    let mut tags = cadcraft_dxf::parse(without_cadcraft_layer_states(&d).as_bytes()).unwrap();
+    for t in tags.iter_mut() {
+        match t.code {
+            91 | 90 | 440 => *t = cadcraft_dxf::Tag::s(t.code, "-99999999999999999999"),
+            62 | 370 => *t = cadcraft_dxf::Tag::i(t.code, i64::MIN),
+            331 => *t = cadcraft_dxf::Tag::s(331, "ZZZ"),
+            _ => {}
+        }
+    }
+    let back = read_dxf(cadcraft_dxf::write_ascii(&tags).as_bytes()).unwrap();
+    assert_eq!(back.layer_states.len(), 2);
 }
 
 fn table_sample() -> Table {

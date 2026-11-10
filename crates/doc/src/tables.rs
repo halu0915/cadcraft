@@ -927,6 +927,76 @@ pub struct Ucs {
 pub struct LayerState {
     pub name: String,
     pub layers: Vec<Layer>,
+    /// The state's description, as the Layer States Manager shows it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// The properties restoring the state sets (`LayerState::ON`…, AutoCAD's layer state mask).
+    /// States saved by CADCraft keep all of them.
+    #[serde(default = "LayerState::all")]
+    pub mask: u32,
+}
+
+impl LayerState {
+    pub const ON: u32 = 1;
+    pub const FROZEN: u32 = 2;
+    pub const LOCKED: u32 = 4;
+    pub const PLOT: u32 = 8;
+    pub const NEW_VP_FREEZE: u32 = 16;
+    pub const COLOR: u32 = 32;
+    pub const LINETYPE: u32 = 64;
+    pub const LINEWEIGHT: u32 = 128;
+    pub const PLOT_STYLE: u32 = 256;
+    pub const VIEWPORT: u32 = 512;
+    pub const TRANSPARENCY: u32 = 1024;
+    /// Every property.
+    pub const ALL: u32 = 2047;
+
+    /// A state that saves every property of `layers`.
+    pub fn new(name: impl Into<String>, layers: Vec<Layer>) -> Self {
+        LayerState { name: name.into(), layers, description: String::new(), mask: Self::ALL }
+    }
+
+    fn all() -> u32 {
+        Self::ALL
+    }
+
+    /// `current` with the properties this state saves taken from `saved` (the same layer in the
+    /// state); the name and description stay `current`'s.
+    pub fn apply(&self, current: &Layer, saved: &Layer) -> Layer {
+        let m = |bit: u32| self.mask & bit != 0;
+        let mut l = current.clone();
+        if m(Self::ON) {
+            l.on = saved.on;
+        }
+        if m(Self::FROZEN) {
+            l.frozen = saved.frozen;
+        }
+        if m(Self::LOCKED) {
+            l.locked = saved.locked;
+        }
+        if m(Self::PLOT) {
+            l.plot = saved.plot;
+        }
+        if m(Self::NEW_VP_FREEZE) {
+            l.vp_freeze_new = saved.vp_freeze_new;
+        }
+        if m(Self::COLOR) {
+            l.color = saved.color;
+        }
+        if m(Self::LINETYPE) {
+            l.linetype = saved.linetype.clone();
+        }
+        if m(Self::LINEWEIGHT) {
+            l.lineweight = saved.lineweight;
+        }
+        if m(Self::PLOT_STYLE) {
+            l.plot_style = saved.plot_style.clone();
+        }
+        if m(Self::TRANSPARENCY) {
+            l.transparency = saved.transparency;
+        }
+        l
+    }
 }
 
 /// A named group of entities (GROUP).

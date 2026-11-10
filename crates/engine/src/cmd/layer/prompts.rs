@@ -111,7 +111,22 @@ enum Stage {
     Layers(Change),
     /// Turning the current layer off asks first.
     ConfirmOff(Vec<String>),
+    /// stAte: the layer state option loop, and the name of a state to save, restore or delete.
+    State,
+    StateName(StateOp),
 }
+
+/// What the layer state name prompt does.
+#[derive(Clone, Copy, Debug)]
+enum StateOp {
+    Save,
+    Restore,
+    Delete,
+}
+
+/// The stAte options. Edit, Name, Import and EXport (the Layer States Manager's) are not
+/// available yet.
+const STATE_OPTIONS: &[&str] = &["?", "Save", "Restore", "Edit", "Name", "Delete", "Import", "EXport"];
 
 #[derive(Default)]
 pub struct LayerM {
@@ -188,12 +203,83 @@ impl LayerM {
             "LOck" => Stage::Layers(Change::Lock),
             "Unlock" => Stage::Layers(Change::Unlock),
             "Description" => Stage::Description,
+            "stAte" => Stage::State,
             other => {
-                // MATerial, stAte, rEconcile: report and stay at the option prompt.
+                // MATerial, rEconcile: report and stay at the option prompt.
                 s.echo(format!("-LAYER {other} is not available yet."));
                 Stage::Option
             }
         };
+        Ok(Step::Continue)
+    }
+
+    fn list_states(&self, s: &mut Session) {
+        let names: Vec<String> = s.doc().map(|d| d.layer_states.iter().map(|st| st.name.clone()).collect()).unwrap_or_default();
+        if names.is_empty() {
+            s.echo("No saved layer states.");
+        }
+        for n in names {
+            s.echo(n);
+        }
+    }
+
+    /// One input at the stAte option prompt; Enter goes back to the -LAYER options.
+    fn state(&mut self, s: &mut Session, i: &Input) -> Result<Step> {
+        self.stage = match i {
+            Input::Enter => Stage::Option,
+            Input::Keyword(k) => match k.as_str() {
+                "?" => {
+                    self.list_states(s);
+                    Stage::State
+                }
+                "Save" => Stage::StateName(StateOp::Save),
+                "Restore" => Stage::StateName(StateOp::Restore),
+                "Delete" => Stage::StateName(StateOp::Delete),
+                other => {
+                    s.echo(format!("-LAYER stAte {other} is not available yet."));
+                    Stage::State
+                }
+            },
+            _ => {
+                self.stage = Stage::State;
+                return Err(retry("Invalid option keyword."));
+            }
+        };
+        Ok(Step::Continue)
+    }
+
+    /// A layer state name for `op`; `?` lists the states and asks again.
+    fn state_name(&mut self, s: &mut Session, op: StateOp, i: &Input, text: Option<String>) -> Result<Step> {
+        self.stage = Stage::State;
+        let Some(name) = text else { return Ok(Step::Continue) };
+        if matches!(i, Input::Keyword(k) if k == "?") || name == "?" {
+            self.list_states(s);
+            self.stage = Stage::StateName(op);
+            return Ok(Step::Continue);
+        }
+        // Names match without regard to case, as the Layer States Manager's do.
+        let existing = s.doc()?.layer_states.iter().find(|st| st.name.eq_ignore_ascii_case(&name)).map(|st| st.name.clone());
+        let r = match (op, existing) {
+            (StateOp::Save, existing) => {
+                if !super::valid_name(&name) {
+                    self.stage = Stage::StateName(op);
+                    return Err(retry("Invalid layer state name."));
+                }
+                if let Some(old) = existing {
+                    let _ = call(s, "layerstate.delete", &json!({ "name": old }));
+                }
+                call(s, "layerstate.save", &json!({ "name": name }))
+            }
+            (StateOp::Restore, Some(n)) => call(s, "layerstate.restore", &json!({ "name": n })),
+            (StateOp::Delete, Some(n)) => call(s, "layerstate.delete", &json!({ "name": n })),
+            (_, None) => {
+                s.echo(format!("Cannot find layer state \"{name}\"."));
+                return Ok(Step::Continue);
+            }
+        };
+        if let Err(e) = r {
+            s.echo(message(&e));
+        }
         Ok(Step::Continue)
     }
 
@@ -391,6 +477,8 @@ impl LayerM {
             },
             Stage::Description => back(self, Stage::Layers(Change::Description(text.unwrap_or_default()))),
             Stage::Layers(change) => self.layers(s, change, text.as_deref()),
+            Stage::State => self.state(s, &i),
+            Stage::StateName(op) => self.state_name(s, op, &i, text),
             Stage::ConfirmOff(names) => {
                 let cur = current_layer(s);
                 let yes = matches!(&i, Input::Keyword(k) if k == "Yes");
@@ -434,6 +522,10 @@ impl Interactive for LayerM {
                 if enter_is_current { p.default(cur) } else { p }
             }
             Stage::ConfirmOff(_) => Prompt::new(format!("Really want layer \"{cur}\" (the CURRENT layer) off?"), KW).kw(&["Yes", "No"]).default("N"),
+            Stage::State => Prompt::new("Enter an option", KW).kw(STATE_OPTIONS),
+            Stage::StateName(StateOp::Save) => Prompt::new("Enter new layer state name", NAME),
+            Stage::StateName(StateOp::Restore) => Prompt::new("Enter name of layer state to restore", NAME).kw(&["?"]),
+            Stage::StateName(StateOp::Delete) => Prompt::new("Enter name of layer state to delete", NAME).kw(&["?"]),
         }
     }
     fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {

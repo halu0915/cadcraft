@@ -712,7 +712,10 @@ pub(crate) fn read_array(tags: &[Tag]) -> Option<ArrayParams> {
     p.is_valid().then_some(p)
 }
 
-/// The saved layer states stored in the `CADCRAFT_LAYERSTATES` XRECORD.
+/// The saved layer states stored in the `CADCRAFT_LAYERSTATES` XRECORD. Version 2 records are
+/// written next to the same states in `ACAD_LAYERSTATES` (see `dxf_layer_states`): a state they
+/// hold that `ACAD_LAYERSTATES` lacks was deleted by another program. Version 1 records come from
+/// CADCraft versions that wrote no `ACAD_LAYERSTATES`.
 #[derive(Serialize, Deserialize)]
 struct LayerStatesPayload {
     version: u32,
@@ -726,20 +729,21 @@ pub(crate) fn layer_state_chunks(states: &[LayerState]) -> Option<Vec<String>> {
     if states.is_empty() {
         return None;
     }
-    let json = serde_json::to_string(&LayerStatesPayload { version: 1, states: states.to_vec() }).ok()?;
+    let json = serde_json::to_string(&LayerStatesPayload { version: 2, states: states.to_vec() }).ok()?;
     Some(json_chunks(&json))
 }
 
-/// Parse the layer states XRECORD text; `None` when it is not a payload we understand.
-pub(crate) fn parse_layer_states(text: &str) -> Option<Vec<LayerState>> {
+/// Parse the layer states XRECORD text into its version and states; `None` when it is not a
+/// payload we understand.
+pub(crate) fn parse_layer_states(text: &str) -> Option<(u32, Vec<LayerState>)> {
     if text.len() > MAX_PAYLOAD {
         return None;
     }
     let p: LayerStatesPayload = serde_json::from_str(text).ok()?;
-    if p.version != 1 || p.states.len() > MAX_LAYER_STATES {
+    if !(1..=2).contains(&p.version) || p.states.len() > MAX_LAYER_STATES {
         return None;
     }
-    Some(p.states)
+    Some((p.version, p.states))
 }
 
 /// The drawing's plot style tables stored in the `CADCRAFT_PLOTSTYLES` XRECORD.
