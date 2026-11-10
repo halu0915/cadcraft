@@ -728,13 +728,18 @@ fn write_viewport_entity(w: &mut W, d: &Drawing, e: &Entity, owner: &str, paper:
 
 fn write_wipeout_entity(w: &mut W, _d: &Drawing, e: &Entity, owner: &str, paper: bool, _cx: &Ctx) {
     if let EntityKind::Wipeout(wo) = &e.kind {
-        // A 1x1 image spanning the boundary's extents. Clip vertices are in pixel space, whose origin is
-        // the image's top-left corner with y pointing down: the reader maps each vertex back through
-        // insert + u * (x + 0.5) + v * (0.5 - y).
+        // A 1x1 image: a square from the boundary's lower-left corner, as wide as the boundary's
+        // larger extent. AutoCAD's own wipeouts have a square frame (|u| = |v|); one stretched to the
+        // boundary's extents (100 x 1000) opened, but AutoCAD's RECOVER (the app's) still erased
+        // such wipeouts of a CADCraft-saved plan. Clip vertices are
+        // in pixel space, whose origin is the image's top-left corner with y pointing down: the reader
+        // maps each vertex back through insert + u * (x + 0.5) + v * (0.5 - y).
         // Polygonal clip boundaries are closed, so the first vertex is repeated when needed.
         let b = Bounds2::from_points(wo.boundary.iter().copied());
         let o = if b.is_empty() { Vec2::ZERO } else { b.min };
-        let (sx, sy) = (if b.width() > 0.0 { b.width() } else { 1.0 }, if b.height() > 0.0 { b.height() } else { 1.0 });
+        let side = b.width().max(b.height());
+        let side = if side.is_finite() && side > 0.0 { side } else { 1.0 };
+        let (sx, sy) = (side, side);
         w.s(0, "WIPEOUT");
         common(w, e, owner, paper, "AcDbWipeout");
         w.i(90, 0);

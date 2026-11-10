@@ -712,7 +712,10 @@ mod native {
             }
             let v = &mut w.clip_boundary_vertices;
             let repeated = v.len() > 3 && v.first() == v.last();
-            if !closed && repeated {
+            // A last corner on the first one (an edited boundary, #2256) keeps its repeat: without
+            // it the DWG would read back with that corner taken for the closing repeat.
+            let corner_on_first = v.len() > 3 && v.get(v.len() - 2) == v.first();
+            if !closed && repeated && !corner_on_first {
                 v.pop();
             } else if closed && !repeated && v.len() >= 3 && v.first() != v.last() {
                 let first = v.first().copied();
