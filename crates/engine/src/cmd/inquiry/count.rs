@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
+use cadcraft_doc::dynblock::custom_properties;
 use cadcraft_doc::{Drawing, Entity, EntityKind, Handle, Insert, MAX_BLOCK_DEPTH, Space};
 use cadcraft_geom::{Mat3, Vec2};
 use serde_json::{Value, json};
@@ -21,7 +22,7 @@ const MAX_HANDLES: usize = 100_000;
 
 /// COUNT's JSON parameters.
 pub(super) const PARAMS: &str = "{block?, object?: handle (count objects like this one), space?: current|model|all|<layout> (default current), \
-     handles?: [...] (count in these objects), nested?: bool (default true), highlight?: bool} → \
+     handles?: [...] (count in these objects), nested?: bool (default true), highlight?: bool, by_param?: bool} → \
      {blocks: {name: n}, nested: {name: n}, spaces: {space: {name: n}}, total} | {block, count, nested, handles}, plus `message` and \
      `selfCheck` (found/analyzed/skipped counts with reasons, and the caps hit: work, handles, blockDepth)";
 
@@ -172,9 +173,17 @@ fn add(m: &mut BTreeMap<String, u64>, k: &str, n: u64) {
     *v = v.saturating_add(n);
 }
 
-/// Anonymous blocks (`*U3`: arrays, dynamic block copies) are traversed but not reported.
+/// Anonymous blocks (`*U3`: arrays, dynamic block copies) are traversed but not reported by raw name.
 fn reported(name: &str) -> bool {
     !name.starts_with('*')
+}
+
+/// Name to add in block counts: named blocks, or a dynamic `*U` block's parent definition.
+fn count_name(d: &Drawing, raw: &str, canonical: &str) -> Option<String> {
+    if reported(raw) {
+        return Some(canonical.to_string());
+    }
+    crate::blockedit::dynamic_definition(d, raw)
 }
 
 #[derive(Default)]
@@ -210,22 +219,25 @@ fn tally(d: &Drawing, scope: &Scope, nested: bool, want: Option<&str>) -> Tally 
             continue;
         };
         t.analyzed = t.analyzed.saturating_add(1);
-        let name = x.canonical(&i.block);
+        let raw = &i.block;
+        let canonical = x.canonical(raw);
         let m = copies(i);
-        let mut holds = want.is_some_and(|w| w.eq_ignore_ascii_case(&name));
+        let count_as = count_name(d, raw, &canonical);
+        let mut holds = want.is_some_and(|w| count_as.as_ref().is_some_and(|n| w.eq_ignore_ascii_case(n)));
         let per = t.spaces.entry(space).or_default();
-        if reported(&name) {
-            add(&mut t.blocks, &name, m);
-            add(per, &name, m);
+        if let Some(ref reported_name) = count_as {
+            add(&mut t.blocks, reported_name, m);
+            add(per, reported_name, m);
         }
         if nested {
-            let sub = x.expand(&name, MAX_BLOCK_DEPTH.saturating_sub(1));
-            for (k, v) in sub.iter().filter(|(k, _)| reported(k)) {
+            let sub = x.expand(&canonical, MAX_BLOCK_DEPTH.saturating_sub(1));
+            for (k, v) in sub.iter() {
                 let n = m.saturating_mul(*v);
-                add(&mut t.blocks, k, n);
-                add(&mut t.nested, k, n);
-                add(per, k, n);
-                holds |= want.is_some_and(|w| w.eq_ignore_ascii_case(k));
+                let Some(rep) = count_name(d, k, k) else { continue };
+                add(&mut t.blocks, &rep, n);
+                add(&mut t.nested, &rep, n);
+                add(per, &rep, n);
+                holds |= want.is_some_and(|w| w.eq_ignore_ascii_case(&rep));
             }
         }
         if holds {
@@ -240,6 +252,29 @@ fn tally(d: &Drawing, scope: &Scope, nested: bool, want: Option<&str>) -> Tally 
     t.truncated = x.truncated;
     t.depth_capped = x.depth_capped;
     t
+}
+
+/// Dynamic block inserts grouped by block name and `property=value` (custom properties).
+fn tally_by_param(d: &Drawing, scope: &Scope) -> BTreeMap<String, BTreeMap<String, u64>> {
+    let x = Expander::new(d);
+    let mut out: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
+    for (_, e) in scope.objects(d) {
+        let EntityKind::Insert(i) = &e.kind else { continue };
+        let canonical = x.canonical(&i.block);
+        let Some(block) = count_name(d, &i.block, &canonical) else { continue };
+        let m = copies(i);
+        let Some((_, props)) = custom_properties(d, e.handle) else { continue };
+        for p in &props {
+            if p.value.is_empty() {
+                continue;
+            }
+            let key = format!("{}={}", p.name, p.value);
+            let per = out.entry(block.clone()).or_default();
+            let v = per.entry(key).or_default();
+            *v = v.saturating_add(m);
+        }
+    }
+    out
 }
 
 /// The self-check for a COUNT-style result: what was scanned, counted and skipped, and the caps
@@ -398,7 +433,14 @@ fn run(s: &mut Session, cmd: &str, p: &Value, default_all: bool) -> Result<Value
             .ok_or_else(|| bad(cmd, format!("`object`: {v} is not an object handle")))?;
         count_like(d, &scope, nested, h)?
     } else {
-        list(&tally(d, &scope, nested, None), &scope)
+        let t = tally(d, &scope, nested, None);
+        let mut r = list(&t, &scope);
+        if bool_or(p, "by_param", false) {
+            if let Some(obj) = r.as_object_mut() {
+                obj.insert("by_param".into(), json!(tally_by_param(d, &scope)));
+            }
+        }
+        r
     };
     if bool_or(p, "highlight", false)
         && let Some(hs) = r.get("handles").and_then(Value::as_array)

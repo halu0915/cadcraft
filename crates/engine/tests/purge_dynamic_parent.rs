@@ -99,3 +99,10 @@ fn purge_keeps_a_used_block_however_many_references_the_drawing_has() {
     assert_eq!(r["purged"]["blocks"], json!(["Unused"]), "{r}");
     assert!(s.doc().unwrap().block("StillUsed").is_some());
 }
+
+#[test]
+fn count_reports_anonymous_dynamic_inserts_under_the_parent_block_name() {
+    let mut s = session();
+    let r = s.execute("count", &json!({ "nested": false })).unwrap();
+    assert_eq!(r["blocks"]["Door"], 2, "{r}");
+}
