@@ -7,6 +7,7 @@
 //! node expressions, printing each object's typed acadrust form, so the minimal object set
 //! for authoring can be read off a real AutoCAD-made block.
 
+use acadrust::entities::EntityType;
 use acadrust::objects::{DynamicBlockData, ObjectType};
 use acadrust::{CadDocument, DwgReader, Handle};
 use std::collections::{BTreeSet, VecDeque};
@@ -126,5 +127,38 @@ fn main() {
                 println!("{:X} {:#?}", h.value(), d);
             }
         }
+    }
+    if cmd == Some("anon") {
+        let name = args.get(3).expect("anon block name e.g. *U3");
+        let br = doc.block_records.iter().find(|b| b.name == *name).unwrap_or_else(|| panic!("no block {name}"));
+        println!("#### ANON {:?} br={:X} flags={:?}", br.name, br.handle.value(), br.flags);
+        println!("xdata: {:?}", doc.object_xdata(br.handle));
+        for e in &br.entity_handles {
+            println!("  ent {:X} xdata={:?}", e.value(), doc.object_xdata(*e));
+        }
+        for ins in &br.insert_handles {
+            println!("-- insert {:X} of *U", ins.value());
+            if let Some(x) = doc.extension_dictionary_handle(*ins) {
+                dump_tree(&doc, x, &format!("insert {:X} xdict", ins.value()));
+            } else {
+                println!("  (no xdict on insert)");
+            }
+        }
+        return;
+    }
+    if cmd == Some("insert") {
+        let hex = args.get(3).expect("insert handle hex");
+        let h = Handle::new(u64::from_str_radix(hex.trim_start_matches("0x"), 16).unwrap_or_else(|_| panic!("bad handle {hex}")));
+        let name = match doc.get_entity(h) {
+            Some(EntityType::Insert(i)) => i.block_name.clone(),
+            _ => "?".into(),
+        };
+        println!("insert {hex} block={name:?}");
+        if let Some(x) = doc.extension_dictionary_handle(h) {
+            dump_tree(&doc, x, "insert xdict");
+        } else {
+            println!("(no xdict)");
+        }
+        return;
     }
 }
