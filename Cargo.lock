@@ -710,6 +710,7 @@ dependencies = [
  "cadcraft-color",
  "cadcraft-constraints",
  "cadcraft-doc",
+ "cadcraft-dwg",
  "cadcraft-dxf",
  "cadcraft-fonts",
  "cadcraft-geom",

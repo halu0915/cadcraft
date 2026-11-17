@@ -117,10 +117,12 @@ fn current(m: &DynamicBlock, values: &BTreeMap<i32, Value>, node: i32) -> Option
             | ParameterKind::Polar { base, end }
             | ParameterKind::Xy { base, end }
             | ParameterKind::Rotation { base, end }
-            | ParameterKind::Alignment { base, end }
-            | ParameterKind::Flip { base, end },
+            | ParameterKind::Alignment { base, end },
             None,
         ) => Val::Points(*base, *end),
+        (ParameterKind::Flip { base_state, .. }, None) => Val::Text(base_state.clone()),
+        (ParameterKind::Flip { .. }, Some(Value::Points { base, end })) => Val::Points(*base, *end),
+        (ParameterKind::Flip { .. }, Some(Value::Text { value })) => Val::Text(value.clone()),
         _ => return None,
     })
 }
@@ -290,6 +292,19 @@ pub fn set_property(d: &mut Drawing, insert: Handle, name: &str, value: &str) ->
             if !plan.lookup(&m, &r.values, p.node, value, None)? {
                 return Err(format!("\"{value}\" is not a value of {label}."));
             }
+        }
+        (ParameterKind::Flip { label, base_state, flipped_state, .. }, _) => {
+            let v = value.trim();
+            let state = if v.eq_ignore_ascii_case(flipped_state) {
+                flipped_state.clone()
+            } else if v.eq_ignore_ascii_case(base_state) {
+                base_state.clone()
+            } else {
+                return Err(format!(
+                    "\"{value}\" is not a state of {label}: {base_state}, {flipped_state}."
+                ));
+            };
+            plan.set.insert(p.node, Val::Text(state));
         }
         (ParameterKind::Linear { values, from_midpoint, .. }, None) => {
             let typed = number(value)? / sx;
@@ -572,6 +587,28 @@ fn apply(
         }
     }
     let shown_copy: HashMap<Handle, bool> = shown.iter().filter_map(|(dh, v)| copy_of(dh).map(|c| (c, *v))).collect();
+    // Flip state: mirror the flip action's selection across the parameter's reflection line.
+    let mut flip_mirror: Option<Mat3> = None;
+    for (node, v) in &new {
+        let Some(p) = m.parameters.iter().find(|p| p.node == *node) else { continue };
+        let (ParameterKind::Flip { base, end, flipped_state, .. }, Val::Text(state)) = (&p.kind, v) else { continue };
+        if state.eq_ignore_ascii_case(flipped_state) {
+            flip_mirror = Some(Mat3::mirror(base.xy(), end.xy()));
+        }
+    }
+    let flip_src: HashSet<Handle> = flip_mirror.map_or_else(HashSet::new, |_| {
+        let mut sel: HashSet<Handle> = m
+            .actions
+            .iter()
+            .filter(|a| matches!(a.kind, ActionKind::Flip))
+            .flat_map(|a| a.selection.iter())
+            .filter_map(|dh| copy_of(dh))
+            .collect();
+        if sel.is_empty() {
+            sel = src.entities.iter().map(|e| e.handle).collect();
+        }
+        sel
+    });
     // The new anonymous block.
     let name = d.anonymous_block_name("*U");
     // AutoCAD's anonymous copies have no units of their own.
@@ -609,6 +646,11 @@ fn apply(
         }
         for (idx, v) in moves.get(&e.handle).into_iter().flatten() {
             move_entity(&mut c, idx.as_deref(), *v);
+        }
+        if let Some(mat) = flip_mirror
+            && flip_src.contains(&e.handle)
+        {
+            c.kind.transform(&mat);
         }
         if let EntityKind::Hatch(h) = &mut c.kind {
             for l in &mut h.loops {
@@ -821,6 +863,7 @@ fn record_values(
                     Some(ParameterKind::Visibility { .. } | ParameterKind::Point { .. } | ParameterKind::BasePoint { .. }) => {
                         write_value(&mut tags, &Val::Point(at(node)));
                     }
+                    Some(ParameterKind::Flip { .. }) => {}
                     Some(ParameterKind::Lookup { label, .. }) => {
                         write_value(&mut tags, &Val::Point(at(node)));
                         if let Some(v) = lookups.get(&label.to_ascii_uppercase()) {
@@ -854,8 +897,14 @@ fn record_values(
     };
     let mut add: Vec<(String, Handle)> = Vec::new();
     for (key, mut tags) in fresh {
-        if let Some(v) = key.parse::<i32>().ok().and_then(|n| set.get(&n)) {
-            write_value(&mut tags, v);
+        if let Ok(n) = key.parse::<i32>()
+            && let Some(v) = set.get(&n)
+        {
+            if let (Some(ParameterKind::Flip { base_state, flipped_state, .. }), Val::Text(state)) = (param(n), v) {
+                write_flip_value(&mut tags, base_state, flipped_state, state);
+            } else {
+                write_value(&mut tags, v);
+            }
         }
         let h = d.new_handle();
         objects.push(ForeignObject { handle: h, kind: "XRECORD".into(), tags: own(tags, h, data) });
@@ -870,16 +919,29 @@ fn record_values(
             Some(h) => {
                 let f = std::sync::Arc::make_mut(&mut d.foreign);
                 if let Some(x) = f.objects.iter_mut().find(|o| o.handle == *h) {
-                    write_value(&mut x.tags, v);
+                    if let (Some(ParameterKind::Flip { base_state, flipped_state, .. }), Val::Text(state)) = (param(*node), v) {
+                        write_flip_value(&mut x.tags, base_state, flipped_state, state);
+                    } else {
+                        write_value(&mut x.tags, v);
+                    }
                 }
             }
             None => {
                 let h = d.new_handle();
                 let mut tags = templates.get(&key).cloned().unwrap_or_else(|| {
-                    let p = at(*node);
-                    vec![tag(100, "AcDbXrecord"), tag(280, "1"), tag(10, p.x.to_string()), tag(20, p.y.to_string()), tag(30, p.z.to_string())]
+                    match param(*node) {
+                        Some(ParameterKind::Flip { .. }) => vec![tag(100, "AcDbXrecord"), tag(280, "1")],
+                        _ => {
+                            let p = at(*node);
+                            vec![tag(100, "AcDbXrecord"), tag(280, "1"), tag(10, p.x.to_string()), tag(20, p.y.to_string()), tag(30, p.z.to_string())]
+                        }
+                    }
                 });
-                write_value(&mut tags, v);
+                if let (Some(ParameterKind::Flip { base_state, flipped_state, .. }), Val::Text(state)) = (param(*node), v) {
+                    write_flip_value(&mut tags, base_state, flipped_state, state);
+                } else {
+                    write_value(&mut tags, v);
+                }
                 objects.push(ForeignObject { handle: h, kind: "XRECORD".into(), tags: own(tags, h, data) });
                 add.push((key, h));
             }
@@ -956,6 +1018,22 @@ fn write_history(tags: &mut Vec<RawTag>, p: &super::Parameter, old: Option<&Val>
         (ParameterKind::Visibility { label, .. } | ParameterKind::Lookup { label, .. }, Val::Text(t)) => {
             vec![(p.node, vec![tag(1071, p.node.to_string()), tag(300, label.clone()), tag(1, t.clone())])]
         }
+        (ParameterKind::Flip { label, flipped_state, .. }, Val::Text(t)) => {
+            let flip = if t.eq_ignore_ascii_case(flipped_state) { "1" } else { "0" };
+            vec![
+                (
+                    p.node,
+                    vec![
+                        tag(1071, p.node.to_string()),
+                        tag(300, "UpdatedFlip"),
+                        tag(70, flip),
+                        tag(1071, p.node.to_string()),
+                        tag(300, label.clone()),
+                        tag(1, t.clone()),
+                    ],
+                ),
+            ]
+        }
         (ParameterKind::Linear { label, .. }, Val::Points(b, e)) => {
             let mut c: Vec<(i32, Vec<RawTag>)> = p.grips.iter().filter(|g| **g != 0).map(|g| (*g, Vec::new())).collect();
             c.push((p.node, vec![tag(1071, p.node.to_string()), tag(300, label.clone()), tag(40, (*e - *b).len().to_string())]));
@@ -981,6 +1059,32 @@ fn write_history(tags: &mut Vec<RawTag>, p: &super::Parameter, old: Option<&Val>
     tags.extend(entries.into_iter().flatten());
 }
 
+/// Flip value records carry the state label (group 1) and `UpdatedFlip` (70); the reflection line
+/// stays on the block parameter, not on each reference (as AutoCAD writes visibility vs flip).
+fn normalize_flip_value_record(tags: &mut Vec<RawTag>) {
+    tags.retain(|t| !matches!(t.code, 10 | 20 | 30 | 11 | 21 | 31));
+}
+
+/// Flip state on a value record: AutoCAD stores the label text (group 1) and `UpdatedFlip` (70).
+fn write_flip_value(tags: &mut Vec<RawTag>, base_state: &str, flipped_state: &str, state: &str) {
+    match tags.iter_mut().find(|t| t.code == 1) {
+        Some(t) => t.value = state.to_string(),
+        None => tags.push(tag(1, state)),
+    }
+    let v = if state.eq_ignore_ascii_case(flipped_state) {
+        "1"
+    } else if state.eq_ignore_ascii_case(base_state) {
+        "0"
+    } else {
+        "0"
+    };
+    match tags.iter_mut().find(|t| t.code == 70) {
+        Some(t) => t.value = v.into(),
+        None => tags.push(tag(70, v)),
+    }
+    normalize_flip_value_record(tags);
+}
+
 /// Write value `v` into a value record's groups: its text (group 1), or its points in order over
 /// the record's points (10/20/30), adding them when it has fewer.
 fn write_value(tags: &mut Vec<RawTag>, v: &Val) {
@@ -995,26 +1099,41 @@ fn write_value(tags: &mut Vec<RawTag>, v: &Val) {
         Val::Point(p) => vec![*p],
         Val::Points(b, e) => vec![*b, *e],
     };
-    for (i, p) in points.iter().enumerate() {
-        // The i-th point's groups, else new ones before any text.
-        let find = |tags: &[RawTag], code: i32, n: usize| tags.iter().enumerate().filter(|(_, t)| t.code == code).nth(n).map(|(j, _)| j);
-        match (find(tags, 10, i), find(tags, 20, i)) {
-            (Some(jx), Some(jy)) => {
-                if let Some(t) = tags.get_mut(jx) {
-                    t.value = p.x.to_string();
-                }
-                if let Some(t) = tags.get_mut(jy) {
-                    t.value = p.y.to_string();
-                }
-                if let Some(t) = find(tags, 30, i).and_then(|jz| tags.get_mut(jz)) {
+    let at_first_text = tags.iter().position(|t| t.code == 1).unwrap_or(tags.len());
+    let find = |tags: &[RawTag], code: i32, n: usize| tags.iter().enumerate().filter(|(_, t)| t.code == code).nth(n).map(|(j, _)| j);
+    let update_at = |tags: &mut Vec<RawTag>, xc: i32, yc: i32, zc: i32, p: Vec3| {
+        if let (Some(jx), Some(jy)) = (find(tags, xc, 0), find(tags, yc, 0)) {
+            if let Some(t) = tags.get_mut(jx) {
+                t.value = p.x.to_string();
+            }
+            if let Some(t) = tags.get_mut(jy) {
+                t.value = p.y.to_string();
+            }
+            if let Some(jz) = find(tags, zc, 0) {
+                if let Some(t) = tags.get_mut(jz) {
                     t.value = p.z.to_string();
                 }
             }
-            _ => {
-                let at = tags.iter().position(|t| t.code == 1).unwrap_or(tags.len());
-                tags.splice(at..at, [tag(10, p.x.to_string()), tag(20, p.y.to_string()), tag(30, p.z.to_string())]);
-            }
+            return true;
         }
+        false
+    };
+    for (i, p) in points.iter().enumerate() {
+        // Flip / two-point parameters store base on 10 and end on 11 (not a second 10).
+        let (xc, yc, zc) = if points.len() == 2 && i == 1 {
+            (11, 21, 31)
+        } else {
+            (10, 20, 30)
+        };
+        if update_at(tags, xc, yc, zc, *p) {
+            continue;
+        }
+        if points.len() == 2 && i == 1 && update_at(tags, 10, 20, 30, *p) {
+            // Older records with two 10 groups.
+            continue;
+        }
+        let at = tags.iter().position(|t| t.code == 1).unwrap_or(tags.len()).min(at_first_text);
+        tags.splice(at..at, [tag(xc, p.x.to_string()), tag(yc, p.y.to_string()), tag(zc, p.z.to_string())]);
     }
 }
 

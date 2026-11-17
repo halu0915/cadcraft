@@ -162,7 +162,7 @@ pub(in crate::cmd) fn used_blocks(d: &Drawing) -> HashSet<String> {
         // A dynamic block reference with values of its own shows an anonymous block (`*U7`)
         // whose record names the dynamic block: that block is in use too, or purging it would
         // leave every such reference without its dynamic definition.
-        frontier.extend(super::bedit::dynamic_definition(d, &n));
+        frontier.extend(crate::blockedit::dynamic_definition(d, &n));
         if let Some(b) = d.block(&n) {
             for e in b.entities.iter() {
                 match &e.kind {

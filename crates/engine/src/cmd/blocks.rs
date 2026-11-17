@@ -17,6 +17,7 @@ use super::{CommandSpec, bad, bool_or, f64_or, find_command, ok, point_param, po
 use super::has_doc;
 use crate::{Accept, EngineError, Input, Interactive, Prompt, Result, Session, Step};
 
+mod bparam;
 mod attdef;
 mod attedit;
 mod burst;
@@ -95,6 +96,7 @@ pub fn specs() -> Vec<CommandSpec> {
     .chain(refedit::specs())
     .chain(xclip::specs())
     .chain(bedit::specs())
+    .chain(bparam::specs())
     .collect()
 }
 

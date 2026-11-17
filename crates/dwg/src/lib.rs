@@ -63,6 +63,8 @@ fn mb(n: u64) -> String {
 }
 
 #[cfg(not(no_dwg_bridge))]
+pub mod dynblock_author;
+#[cfg(not(no_dwg_bridge))]
 pub mod worker;
 #[cfg(not(no_dwg_bridge))]
 pub use worker::{WORKER_ARG, crash_worker_for_test, decode, encode_as, encode_kept_noted, encode_noted, serve_if_asked, use_own_worker, use_worker};
