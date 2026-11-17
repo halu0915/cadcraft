@@ -588,7 +588,44 @@ fn lwpolyline_bounds(p: &LwPolyline) -> Bounds2 {
             }
         }
     }
+    join_tips(p, &mut b);
     b
+}
+
+/// Adds the miter tips where consecutive wide segments of equal width meet, as the renderer
+/// joins them: a sharp corner's tip reaches well past both bands. The same segments (each with
+/// the vertex it starts at), widths, end tangents and `cadcraft_geom::outer_join` as the
+/// renderer's wide polyline fill, so the tip found here is the tip drawn.
+fn join_tips(p: &LwPolyline, b: &mut Bounds2) {
+    let n = p.vertices.len();
+    let tangent = |s: &cadcraft_geom::Segment, t: f64| {
+        let d = s.tangent(t);
+        (d.is_finite() && (d.len() - 1.0).abs() < 1e-6).then_some(d)
+    };
+    // Per segment: (start tangent, end tangent, start and end half width, end point).
+    let segs: Vec<(Option<Vec2>, Option<Vec2>, f64, f64, Vec2)> = Polyline { vertices: p.vertices.clone(), closed: p.closed }
+        .indexed_segments()
+        .iter()
+        .map(|(i, s)| {
+            let v = p.vertices.get(*i % n.max(1)).copied().unwrap_or_default();
+            // As drawn: the constant width wins; raw widths (a negative or NaN one joins nothing).
+            let (w0, w1) = if p.const_width > 0.0 { (p.const_width, p.const_width) } else { (v.start_width, v.end_width) };
+            (tangent(s, 0.0), tangent(s, 1.0), w0 / 2.0, w1 / 2.0, s.end())
+        })
+        .collect();
+    let pairs = if p.closed { segs.len() } else { segs.len().saturating_sub(1) };
+    for i in 0..pairs {
+        let (Some(a), Some(c)) = (segs.get(i), segs.get((i + 1) % segs.len().max(1))) else { continue };
+        let (hw, hw2) = (a.3, c.2);
+        let scale = hw.abs().max(hw2.abs());
+        if !(hw > 0.0 && hw2 > 0.0 && scale.is_finite()) || (hw - hw2).abs() > scale * 1e-9 {
+            continue;
+        }
+        let (Some(d0), Some(d1)) = (a.1, c.0) else { continue };
+        if let Some(tip) = cadcraft_geom::outer_join(a.4, d0, d1, hw).and_then(|j| j.tip(a.4, hw)) {
+            b.add(tip);
+        }
+    }
 }
 
 #[cfg(test)]
