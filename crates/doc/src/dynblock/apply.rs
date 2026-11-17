@@ -117,10 +117,12 @@ fn current(m: &DynamicBlock, values: &BTreeMap<i32, Value>, node: i32) -> Option
             | ParameterKind::Polar { base, end }
             | ParameterKind::Xy { base, end }
             | ParameterKind::Rotation { base, end }
-            | ParameterKind::Alignment { base, end }
-            | ParameterKind::Flip { base, end },
+            | ParameterKind::Alignment { base, end },
             None,
         ) => Val::Points(*base, *end),
+        (ParameterKind::Flip { base_state, .. }, None) => Val::Text(base_state.clone()),
+        (ParameterKind::Flip { .. }, Some(Value::Points { base, end })) => Val::Points(*base, *end),
+        (ParameterKind::Flip { .. }, Some(Value::Text { value })) => Val::Text(value.clone()),
         _ => return None,
     })
 }
@@ -290,6 +292,19 @@ pub fn set_property(d: &mut Drawing, insert: Handle, name: &str, value: &str) ->
             if !plan.lookup(&m, &r.values, p.node, value, None)? {
                 return Err(format!("\"{value}\" is not a value of {label}."));
             }
+        }
+        (ParameterKind::Flip { label, base_state, flipped_state, .. }, _) => {
+            let v = value.trim();
+            let state = if v.eq_ignore_ascii_case(flipped_state) {
+                flipped_state.clone()
+            } else if v.eq_ignore_ascii_case(base_state) {
+                base_state.clone()
+            } else {
+                return Err(format!(
+                    "\"{value}\" is not a state of {label}: {base_state}, {flipped_state}."
+                ));
+            };
+            plan.set.insert(p.node, Val::Text(state));
         }
         (ParameterKind::Linear { values, from_midpoint, .. }, None) => {
             let typed = number(value)? / sx;
@@ -953,7 +968,7 @@ fn write_history(tags: &mut Vec<RawTag>, p: &super::Parameter, old: Option<&Val>
         _ => None,
     };
     let changes: Vec<(i32, Vec<RawTag>)> = match (&p.kind, v) {
-        (ParameterKind::Visibility { label, .. } | ParameterKind::Lookup { label, .. }, Val::Text(t)) => {
+        (ParameterKind::Visibility { label, .. } | ParameterKind::Lookup { label, .. } | ParameterKind::Flip { label, .. }, Val::Text(t)) => {
             vec![(p.node, vec![tag(1071, p.node.to_string()), tag(300, label.clone()), tag(1, t.clone())])]
         }
         (ParameterKind::Linear { label, .. }, Val::Points(b, e)) => {

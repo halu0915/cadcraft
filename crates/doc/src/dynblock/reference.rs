@@ -256,6 +256,18 @@ pub fn custom_properties(d: &Drawing, insert: Handle) -> Option<(String, Vec<Cus
                 let editable = lookup_sets_what_changes(&m, p.node);
                 out.push(CustomProperty { name: label.clone(), value, choices, editable });
             }
+            ParameterKind::Flip { label, base_state, flipped_state, .. } => {
+                let value = match v {
+                    Some(Value::Text { value }) => value.clone(),
+                    _ => base_state.clone(),
+                };
+                out.push(CustomProperty {
+                    name: label.clone(),
+                    value,
+                    choices: vec![base_state.clone(), flipped_state.clone()],
+                    editable: true,
+                });
+            }
             _ => {}
         }
     }

@@ -96,7 +96,13 @@ pub enum ParameterKind {
     /// Aligns the reference with nearby geometry.
     Alignment { base: Vec3, end: Vec3 },
     /// Mirrors the objects about a reflection line.
-    Flip { base: Vec3, end: Vec3 },
+    Flip {
+        base: Vec3,
+        end: Vec3,
+        label: String,
+        base_state: String,
+        flipped_state: String,
+    },
     /// A position (Position1).
     Point { at: Vec3, label: String, description: String },
     /// Named sets of visible objects.
@@ -123,7 +129,8 @@ impl ParameterKind {
             ParameterKind::Linear { label, .. }
             | ParameterKind::Point { label, .. }
             | ParameterKind::Visibility { label, .. }
-            | ParameterKind::Lookup { label, .. } => Some(label),
+            | ParameterKind::Lookup { label, .. }
+            | ParameterKind::Flip { label, .. } => Some(label),
             _ => None,
         }
     }
@@ -446,14 +453,25 @@ fn parameter(kind: &str, secs: &[(&str, &[RawTag])]) -> ParameterKind {
             ParameterKind::Lookup { at: one(), label: c.string(303), description: c.string(304) }
         }
         "BLOCKBASEPOINTPARAMETER" => ParameterKind::BasePoint { at: one() },
-        "BLOCKPOLARPARAMETER" | "BLOCKXYPARAMETER" | "BLOCKROTATIONPARAMETER" | "BLOCKALIGNMENTPARAMETER" | "BLOCKFLIPPARAMETER" => {
+        "BLOCKFLIPPARAMETER" => {
+            let (base, end) = two();
+            let mut c = Cursor::new(section(secs, "AcDbBlockFlipParameter"));
+            ParameterKind::Flip {
+                base,
+                end,
+                label: c.string(305),
+                base_state: c.string(307),
+                flipped_state: c.string(308),
+            }
+        }
+        "BLOCKPOLARPARAMETER" | "BLOCKXYPARAMETER" | "BLOCKROTATIONPARAMETER" | "BLOCKALIGNMENTPARAMETER" => {
             let (base, end) = two();
             match kind {
                 "BLOCKPOLARPARAMETER" => ParameterKind::Polar { base, end },
                 "BLOCKXYPARAMETER" => ParameterKind::Xy { base, end },
                 "BLOCKROTATIONPARAMETER" => ParameterKind::Rotation { base, end },
                 "BLOCKALIGNMENTPARAMETER" => ParameterKind::Alignment { base, end },
-                _ => ParameterKind::Flip { base, end },
+                other => ParameterKind::Other { dxf_type: other.to_string() },
             }
         }
         other => ParameterKind::Other { dxf_type: other.to_string() },
