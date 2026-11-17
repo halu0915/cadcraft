@@ -174,6 +174,16 @@ fn proxy_objects_are_reported_like_proxy_entities() {
     assert_eq!(lost(Version::R2004), 2, "before 2013 every proxy object is left out");
     assert_eq!(lost(Version::R2010), 2);
     assert_eq!(lost(Version::R2018), 1, "from 2013 only the one whose class the file doesn't name");
+    // A proxy object that names an entity class is left out too: AutoCAD doesn't open a drawing with one.
+    let class = |name: &str, entity: &str| vec![RawTag { code: 1, value: name.into() }, RawTag { code: 281, value: entity.into() }];
+    d.foreign = std::sync::Arc::new(Foreign {
+        class_order: vec!["MYAPP_DATA".into(), "MYAPP_GRIP".into()],
+        classes: vec![class("MYAPP_DATA", "0"), class("MYAPP_GRIP", "1")],
+        objects: vec![object(0x500, 500), object(0x501, 501)],
+        ..Foreign::default()
+    });
+    let lost = |v| not_saved_as(&d, v).get("ACAD_PROXY_OBJECT").copied().unwrap_or(0);
+    assert_eq!(lost(Version::R2018), 1, "the one of the entity class");
 }
 
 /// A DXF of 2013 or later can't hold a solid's SAT-text geometry (it lives in the data store

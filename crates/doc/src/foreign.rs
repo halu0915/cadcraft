@@ -90,6 +90,20 @@ impl Foreign {
         class_index(class_number(tags.iter().map(|r| (r.code, r.value.as_str())))).and_then(|i| self.class_order.get(i)).map(String::as_str)
     }
 
+    /// Whether the class a proxy's group 91 names ([`Foreign::proxy_class`]) is an entity's (its
+    /// CLASS record's group 281). Saving as DWG leaves out a proxy object of an entity class:
+    /// AutoCAD doesn't open a drawing with one.
+    pub fn proxy_class_is_entity(&self, tags: &[RawTag]) -> bool {
+        let Some(name) = self.proxy_class(tags) else { return false };
+        let named = |c: &&Vec<RawTag>| c.iter().any(|t| t.code == 1 && t.value.trim().eq_ignore_ascii_case(name));
+        let place = class_index(class_number(tags.iter().map(|r| (r.code, r.value.as_str()))));
+        let class = match place.and_then(|i| self.classes.get(i)).filter(|_| self.complete_class_table) {
+            Some(class) => Some(class),
+            None => self.classes.iter().find(named),
+        };
+        class.is_some_and(|c| c.iter().any(|t| t.code == 281 && t.value.trim().parse::<i64>().is_ok_and(|v| v != 0)))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.objects.is_empty()
             && self.dictionary.is_empty()

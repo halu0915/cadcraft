@@ -2319,7 +2319,8 @@ fn wipeout_boundary_keeps_its_orientation() {
     let boundary = vec![Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0), Vec2::new(0.0, 4.0)];
     d.add(&Space::Model, Common::default(), EntityKind::Wipeout(Wipeout { boundary: boundary.clone() })).unwrap();
     let text = write_dxf(&d);
-    // The apex (0, 4) is at the top-left corner of the image: pixel (-0.5, -0.5).
+    // The frame is a 10 x 10 square from (0, 0) (AutoCAD's wipeouts have |u| = |v|), so the apex
+    // (0, 4) is on its left edge, 0.4 of the way up: pixel (-0.5, 0.1), y pointing down from the top.
     let pts: Vec<(f64, f64)> = {
         let lines: Vec<&str> = text.lines().map(str::trim).collect();
         let mut v = Vec::new();
@@ -2330,7 +2331,7 @@ fn wipeout_boundary_keeps_its_orientation() {
         }
         v
     };
-    assert!(pts.iter().any(|&(x, y)| (x + 0.5).abs() < 1e-9 && (y + 0.5).abs() < 1e-9), "{pts:?}");
+    assert!(pts.iter().any(|&(x, y)| (x + 0.5).abs() < 1e-9 && (y - 0.1).abs() < 1e-9), "{pts:?}");
     let back = roundtrip(&d);
     let got = first(&back, |k| if let EntityKind::Wipeout(w) = k { Some(w.boundary.clone()) } else { None });
     assert_eq!(&got[..3], &boundary[..]);
@@ -2615,6 +2616,61 @@ fn mirrored_ellipse_extrusion_reverses_parameters() {
     for (got, want) in [(b.min.x, 0.0), (b.min.y, -1.0), (b.max.x, 2.0), (b.max.y, 0.0)] {
         assert!((got - want).abs() < 1e-6, "extents {b:?}");
     }
+}
+
+#[test]
+fn wipeout_frame_is_square_and_keeps_the_boundary() {
+    // AutoCAD's own wipeouts have |u| = |v|; the clip polygon, not the frame, gives the shape.
+    let mut d = Drawing::new_metric();
+    let boundary = vec![Vec2::new(10.0, 20.0), Vec2::new(110.0, 20.0), Vec2::new(110.0, 1020.0), Vec2::new(10.0, 1020.0)];
+    d.add(&Space::Model, Common::default(), EntityKind::Wipeout(Wipeout { boundary: boundary.clone() })).unwrap();
+    let out = write_dxf(&d);
+    let lines: Vec<&str> = out.lines().map(str::trim).collect();
+    let at = (1..lines.len()).find(|&i| lines[i] == "WIPEOUT" && lines[i - 1] == "0").unwrap();
+    let group = |code: &str| -> f64 {
+        let i = (at..lines.len()).find(|&i| lines[i] == code && (i - at) % 2 == 1).unwrap();
+        lines[i + 1].parse().unwrap()
+    };
+    let u = Vec3::new(group("11"), group("21"), group("31"));
+    let v = Vec3::new(group("12"), group("22"), group("32"));
+    assert_eq!((u.len(), v.len()), (1000.0, 1000.0), "u {u:?} v {v:?}");
+    let back = read_dxf(out.as_bytes()).unwrap();
+    let got = first(&back, |k| if let EntityKind::Wipeout(w) = k { Some(w.vertices().to_vec()) } else { None });
+    assert_eq!(got.len(), boundary.len());
+    for (g, w) in got.iter().zip(&boundary) {
+        assert!((*g - *w).len() < 1e-9, "{got:?} vs {boundary:?}");
+    }
+}
+
+#[test]
+fn ellipse_normal_is_written_perpendicular_to_its_major_axis() {
+    // A circle of a block drawn on a slightly tilted plane: its major axis has a tiny Z. A DWG
+    // keeps the normal and the major axis apart, and AutoCAD erases an ellipse whose normal isn't
+    // perpendicular to its major axis, so the DXF (the DWG bridge's input) carries a normal that is.
+    let major = "11\n-12.37413883456795\n21\n-15.28570942891765\n31\n-0.0000148065646546\n40\n1\n41\n0\n42\n6.283185307179586\n";
+    for extrusion in ["210\n-0.000003044497323297518\n220\n0.000001495937628003066\n230\n0.9999999999942467\n", ""] {
+        let text = format!("0\nSECTION\n2\nENTITIES\n0\nELLIPSE\n8\n0\n10\n0\n20\n0\n30\n0\n{major}{extrusion}0\nENDSEC\n0\nEOF\n");
+        let d = read(text.as_bytes(), "e.dxf").unwrap();
+        let out = write_dxf(&d);
+        let lines: Vec<&str> = out.lines().map(str::trim).collect();
+        let at = lines.iter().position(|l| *l == "ELLIPSE").unwrap();
+        let group = |code: &str| -> f64 {
+            let i = (at..lines.len()).find(|&i| lines[i] == code && (i - at) % 2 == 1).unwrap();
+            lines[i + 1].parse().unwrap()
+        };
+        let n = Vec3::new(group("210"), group("220"), group("230"));
+        let m = Vec3::new(group("11"), group("21"), group("31"));
+        assert!((n.len() - 1.0).abs() < 1e-12, "{n:?}");
+        assert!(n.dot(m).abs() < 1e-12 * m.len(), "normal {n:?} not perpendicular to {m:?}");
+        assert!(n.z > 0.999_999, "{n:?}");
+    }
+    // A flat ellipse keeps the default normal: no 210.
+    let flat = "0\nSECTION\n2\nENTITIES\n0\nELLIPSE\n8\n0\n10\n0\n20\n0\n30\n0\n11\n2\n21\n0\n31\n0\n40\n0.5\n0\nENDSEC\n0\nEOF\n";
+    let out = write_dxf(&read(flat.as_bytes(), "e.dxf").unwrap());
+    let lines: Vec<&str> = out.lines().map(str::trim).collect();
+    let at = lines.iter().position(|l| *l == "ELLIPSE").unwrap();
+    let end = (at + 1..lines.len()).find(|&i| lines[i] == "0" && (i - at) % 2 == 1).unwrap();
+    assert!(!lines[at..end].iter().skip(1).step_by(2).any(|c| *c == "210"), "{:?}", &lines[at..end]);
 }
 
 #[test]
