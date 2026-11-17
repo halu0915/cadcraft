@@ -195,7 +195,7 @@ fn cap(out: &mut Vec<Vec2>, p: Vec2, out_dir: Vec2, hw: f64, end: EndStyle) {
 }
 
 /// The corner at `c` between a segment arriving in direction `d0` and one leaving in `d1`.
-fn corner(out: &mut Vec<Vec2>, c: Vec2, d0: Vec2, d1: Vec2, hw: f64, join: JoinStyle) {
+pub(crate) fn corner(out: &mut Vec<Vec2>, c: Vec2, d0: Vec2, d1: Vec2, hw: f64, join: JoinStyle) {
     let turn = d0.cross(d1);
     if turn.abs() <= 1e-12 && d0.dot(d1) > 0.0 {
         return; // straight on

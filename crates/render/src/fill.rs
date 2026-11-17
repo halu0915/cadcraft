@@ -116,11 +116,32 @@ fn crossing_y(l: &(f64, f64, f64), r: &(f64, f64, f64), ya: f64, yb: f64) -> Opt
     (y > ya && y < yb && y - ya > 1e-12 && yb - y > 1e-12).then_some(y)
 }
 
-/// Triangles for a polyline with widths (constant or tapered per segment).
+/// Where a band segment starts or ends: centre point, unit direction of travel, half width.
+type BandEnd = (Vec2, Vec2, f64);
+
+/// Fill the outer corner where one band segment ends (`a`) and the next starts (`b`), so the
+/// bands meet in a point like AutoCAD joins wide polyline segments, bevelled past
+/// [`crate::pen`]'s miter limit as plot-style miter joins are. Only where both bands are equally
+/// wide at the shared vertex: a width step stays a step.
+fn join_bands(out: &mut Vec<Vec2>, a: BandEnd, b: BandEnd) {
+    let (pa, da, hwa) = a;
+    let (pb, db, hwb) = b;
+    let scale = hwa.abs().max(hwb.abs());
+    if !(hwa > 0.0 && hwb > 0.0 && scale.is_finite()) || (hwa - hwb).abs() > scale * 1e-9 || pa.dist(pb) > scale * 1e-9 {
+        return;
+    }
+    crate::pen::corner(out, pa, da, db, hwa, cadcraft_doc::JoinStyle::Miter);
+}
+
+/// Triangles for a polyline with widths (constant or tapered per segment). Consecutive segments
+/// of equal width at their shared vertex are joined with a miter (bevelled when very sharp),
+/// including the closing vertex of a closed polyline.
 pub fn wide_polyline(p: &LwPolyline, tol: f64) -> Vec<Vec2> {
     let pl = Polyline { vertices: p.vertices.clone(), closed: p.closed };
     let mut out = Vec::new();
     let n = p.vertices.len();
+    let mut first_start: Option<BandEnd> = None;
+    let mut prev_end: Option<BandEnd> = None;
     for (i, seg) in pl.segments().iter().enumerate() {
         let v = p.vertices.get(i % n.max(1)).copied().unwrap_or_default();
         let (w0, w1) = if p.const_width > 0.0 { (p.const_width, p.const_width) } else { (v.start_width, v.end_width) };
@@ -137,6 +158,16 @@ pub fn wide_polyline(p: &LwPolyline, tol: f64) -> Vec<Vec2> {
             let dir = if k + 1 < m { pts.get(k + 1).map(|n| *n - *q) } else { pts.get(k.wrapping_sub(1)).map(|pv| *q - *pv) }
                 .unwrap_or(Vec2::X)
                 .normalized();
+            if k == 0 {
+                let start = (*q, dir, w);
+                if let Some(end) = prev_end {
+                    join_bands(&mut out, end, start);
+                }
+                first_start.get_or_insert(start);
+            }
+            if k + 1 == m {
+                prev_end = Some((*q, dir, w));
+            }
             let nrm = dir.perp() * w;
             let cur = (*q + nrm, *q - nrm);
             if let Some((a, b)) = prev {
@@ -144,6 +175,11 @@ pub fn wide_polyline(p: &LwPolyline, tol: f64) -> Vec<Vec2> {
             }
             prev = Some(cur);
         }
+    }
+    if p.closed
+        && let (Some(end), Some(start)) = (prev_end, first_start)
+    {
+        join_bands(&mut out, end, start);
     }
     out
 }

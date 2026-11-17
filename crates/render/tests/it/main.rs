@@ -15,5 +15,6 @@ mod psltscale;
 mod raster_points;
 mod render_props;
 mod viewport_frozen_layer;
+mod wide_pline_join;
 mod wide_pline_linetype;
 mod wipeout_mask;
