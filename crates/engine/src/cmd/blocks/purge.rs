@@ -127,8 +127,9 @@ pub(in crate::cmd) fn override_arrows(dm: &cadcraft_doc::Dimension) -> impl Iter
         .filter(|n| !n.is_empty())
 }
 
-/// Upper-case names of blocks reachable from model space, the layouts and dimensions, and the
-/// arrowhead blocks dimension styles and dimension overrides name.
+/// Upper-case names of blocks reachable from model space, the layouts and dimensions, the
+/// arrowhead blocks dimension styles and dimension overrides name, and the dynamic blocks the
+/// anonymous blocks among them stand for.
 pub(in crate::cmd) fn used_blocks(d: &Drawing) -> HashSet<String> {
     let mut used = HashSet::new();
     let mut frontier: Vec<String> = Vec::new();
@@ -151,12 +152,17 @@ pub(in crate::cmd) fn used_blocks(d: &Drawing) -> HashSet<String> {
             _ => {}
         }
     }
-    let mut guard = 0;
+    // Each block is walked once (the `used` set), so the work is bounded by the drawing's own
+    // entity count and cyclic references end. No cap on the names popped: a cap stopped the scan
+    // with blocks still waiting, and PURGE then deleted them although they were in use.
     while let Some(n) = frontier.pop() {
-        guard += 1;
-        if guard > 100_000 || !used.insert(n.to_ascii_uppercase()) {
+        if !used.insert(n.to_ascii_uppercase()) {
             continue;
         }
+        // A dynamic block reference with values of its own shows an anonymous block (`*U7`)
+        // whose record names the dynamic block: that block is in use too, or purging it would
+        // leave every such reference without its dynamic definition.
+        frontier.extend(super::bedit::dynamic_definition(d, &n));
         if let Some(b) = d.block(&n) {
             for e in b.entities.iter() {
                 match &e.kind {
