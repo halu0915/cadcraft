@@ -527,7 +527,7 @@ fn action(handle: Handle, node: i32, name: String, kind: &str, secs: &[(&str, &[
         }
         "BLOCKSCALEACTION" => (Vec::new(), ActionKind::Scale),
         "BLOCKROTATEACTION" => (Vec::new(), ActionKind::Rotate),
-        "BLOCKFLIPACTION" => (Vec::new(), ActionKind::Flip),
+        "BLOCKFLIPACTION" => (two_connections(section(secs, "AcDbBlockFlipAction")), ActionKind::Flip),
         "BLOCKARRAYACTION" => (Vec::new(), ActionKind::Array),
         "BLOCKPOLARSTRETCHACTION" => (Vec::new(), ActionKind::PolarStretch),
         other => (Vec::new(), ActionKind::Other { dxf_type: other.to_string() }),

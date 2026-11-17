@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use cadcraft_doc::dynblock::{ObjectIndex, dynamic_block, is_dynamic_block_in};
+use cadcraft_doc::dynblock::{ObjectIndex, dynamic_block, is_dynamic_block_in, reference};
+use cadcraft_engine::doc::foreign::ForeignObject;
+use cadcraft_engine::doc::{Handle, RawTag};
 use cadcraft_engine::Session;
 use cadcraft_engine::doc::EntityKind;
 use serde_json::{Value, json};
@@ -18,6 +20,36 @@ fn install_io() {
         write: |d, name| cadcraft_io::write(d, name).map_err(|e| e.to_string()),
         plot: None,
     });
+}
+
+fn xrecord_sig(o: &ForeignObject) -> String {
+    o.tags
+        .iter()
+        .map(|t: &RawTag| format!("{}={}", t.code, t.value.trim()))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn flip_phase1_session() -> Session {
+    let mut s = Session::new();
+    let flip = arrow_block(&mut s);
+    s.execute(
+        "bparam.flip",
+        &json!({ "block": flip, "line": [[15.0, -3.0], [15.0, 33.0]] }),
+    )
+    .unwrap();
+    for _ in 0..3 {
+        s.execute("insert", &json!({ "name": flip, "at": [0, 0] })).unwrap();
+    }
+    for _ in 0..2 {
+        let h = s.execute("insert", &json!({ "name": flip, "at": [40, 0] })).unwrap()["handle"].clone();
+        s.execute(
+            "blocks.reference.set",
+            &json!({ "handle": h, "name": "Flip state1", "value": "Flipped" }),
+        )
+        .unwrap();
+    }
+    s
 }
 
 fn line(s: &mut Session, a: [f64; 2], b: [f64; 2]) -> Value {
@@ -153,6 +185,155 @@ fn dynamic_objects_survive_open_save_edit_resave() {
 }
 
 #[test]
+#[test]
+fn flipped_arrow_anonymous_block_geometry_differs() {
+    let s = flip_phase1_session();
+    let d = s.doc().unwrap();
+    let u = s
+        .doc()
+        .unwrap()
+        .model
+        .iter()
+        .find_map(|e| match &e.kind {
+            EntityKind::Insert(i) if i.block.starts_with("*U") => Some(i.block.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let a: f64 = d
+        .block("ARROW")
+        .unwrap()
+        .entities
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EntityKind::Line(l) => Some(l.b.x),
+            _ => None,
+        })
+        .sum();
+    let b: f64 = d
+        .block(&u)
+        .unwrap()
+        .entities
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EntityKind::Line(l) => Some(l.b.x),
+            _ => None,
+        })
+        .sum();
+    assert!((a - b).abs() > 1e-6, "mirrored *U line sum {b} vs ARROW {a}");
+}
+
+#[test]
+fn flip_value_xrecord_includes_updated_flip_flag() {
+    install_io();
+    let dir = TempDir::new("flip-xrec");
+    let path = dir.join("flip.dwg");
+    let mut s = flip_phase1_session();
+    s.execute("saveas", &json!({ "path": path.to_string_lossy() })).unwrap();
+    let mut s2 = Session::new();
+    s2.execute("open", &json!({ "path": path.to_string_lossy() })).unwrap();
+    let d = s2.doc().unwrap();
+    let h = d
+        .model
+        .iter()
+        .find_map(|e| match &e.kind {
+            EntityKind::Insert(i) if i.block.starts_with("*U") => Some(e.handle),
+            _ => None,
+        })
+        .expect("flipped insert");
+    let _ = reference(d, h).expect("dynamic ref");
+    let xdict = d.foreign.entities.get(&h).and_then(|x| x.xdict).expect("xdict");
+    let dict = d.foreign.objects.iter().find(|o| o.handle == xdict).expect("dict");
+    let rep_h = dict
+        .tags
+        .windows(2)
+        .find_map(|w| {
+            if w[0].code == 3 && w[0].value == "AcDbBlockRepresentation" {
+                Handle::parse_hex(&w[1].value)
+            } else {
+                None
+            }
+        })
+        .expect("rep");
+    let rep = d.foreign.objects.iter().find(|o| o.handle == rep_h).expect("rep obj");
+    let cache_h = rep
+        .tags
+        .windows(2)
+        .find_map(|w| (w[0].code == 3 && w[0].value == "AppDataCache").then(|| Handle::parse_hex(&w[1].value)).flatten())
+        .expect("cache");
+    let data_h = d
+        .foreign
+        .objects
+        .iter()
+        .find(|o| o.handle == cache_h)
+        .and_then(|c| {
+            c.tags.windows(2).find_map(|w| {
+                if w[0].code == 3 && w[0].value == "ACAD_ENHANCEDBLOCKDATA" {
+                    Handle::parse_hex(&w[1].value)
+                } else {
+                    None
+                }
+            })
+        })
+        .expect("data");
+    let data = d.foreign.objects.iter().find(|o| o.handle == data_h).expect("data dict");
+    let value_h = data
+        .tags
+        .windows(2)
+        .find_map(|w| (w[0].code == 3).then(|| (w[0].value.clone(), Handle::parse_hex(&w[1].value))))
+        .expect("value entry");
+    let xrec = d.foreign.objects.iter().find(|o| o.handle == value_h.1.unwrap()).expect("xrecord");
+    let sig = xrecord_sig(xrec);
+    assert!(sig.contains("70=1"), "flip xrecord should carry UpdatedFlip=1: {sig}");
+    assert!(sig.contains("1=Flipped"), "flip text state: {sig}");
+}
+
+#[test]
+fn flipped_arrow_insert_has_representation_before_save() {
+    let mut s = flip_phase1_session();
+    let h = s
+        .doc()
+        .unwrap()
+        .model
+        .iter()
+        .filter_map(|e| match &e.kind {
+            cadcraft_engine::doc::EntityKind::Insert(i) if i.block.starts_with("*U") => Some(e.handle.hex()),
+            _ => None,
+        })
+        .next()
+        .expect("flipped *U insert");
+    let handle = cadcraft_engine::doc::Handle::parse_hex(&h).unwrap();
+    let d = s.doc().unwrap();
+    let ins = &d.entity(handle).unwrap().kind;
+    let cadcraft_engine::doc::EntityKind::Insert(i) = ins else { panic!("not insert") };
+    assert!(i.block.starts_with("*U"), "flipped ref should use anonymous block: {}", i.block);
+    let xdict = d.foreign.entities.get(&handle).and_then(|x| x.xdict).expect("insert xdict");
+    let rep = d
+        .foreign
+        .objects
+        .iter()
+        .find(|o| o.handle == xdict)
+        .and_then(|dict| dict.tags.iter().find(|t| t.code == 3 && t.value == "AcDbBlockRepresentation"))
+        .is_some();
+    assert!(rep, "AcDbBlockRepresentation entry on insert xdict");
+}
+
+#[test]
+fn flipped_arrow_survives_dwg_save_and_reload() {
+    install_io();
+    let dir = TempDir::new("flip-roundtrip");
+    let path = dir.join("flip.dwg");
+    let mut s = flip_phase1_session();
+    s.execute("saveas", &json!({ "path": path.to_string_lossy() })).unwrap();
+    let mut s2 = Session::new();
+    s2.execute("open", &json!({ "path": path.to_string_lossy() })).unwrap();
+    let r = s2.execute("count", &json!({ "by_param": true, "nested": false })).unwrap();
+    let by: BTreeMap<String, BTreeMap<String, u64>> = serde_json::from_value(r["by_param"].clone()).unwrap();
+    let flip_counts = &by["ARROW"];
+    assert_eq!(flip_counts.get("Flip state1=Not flipped"), Some(&3));
+    assert_eq!(flip_counts.get("Flip state1=Flipped"), Some(&2));
+}
+
+#[test]
 fn count_by_param_groups_flip_and_visibility_inserts() {
     let mut s = Session::new();
     let flip = arrow_block(&mut s);
@@ -273,7 +454,7 @@ fn write_phase1_fixture_for_autocad() {
     std::fs::write(
         &scr,
         format!(
-            "FILEDIA 0\nCMDDIA 0\nINSUNITS 5\nAUDIT Y\nLIST ALL\n\n\n\nSAVEAS 2018 {}\nQUIT Y\n",
+            "FILEDIA 0\nCMDDIA 0\nINSUNITS 5\nAUDIT Y\nLIST ALL\n\n\n\nSAVEAS 2018 {}\nY\nQUIT Y\n",
             saveas2018.display()
         ),
     )
