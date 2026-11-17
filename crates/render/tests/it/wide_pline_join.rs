@@ -129,3 +129,35 @@ fn straight_and_reversing_vertices_add_nothing() {
     assert!(back.iter().all(|p| p.is_finite()));
     assert_eq!(back.len(), 12, "a 180° turn has no outside to fill");
 }
+
+/// A layout viewport that sees only a sharp corner's miter tip still draws it: the polyline's
+/// extents, which viewports cull by, contain the tip.
+#[test]
+fn viewport_showing_only_a_miter_tip_draws_it() {
+    use cadcraft_doc::Viewport;
+    use cadcraft_geom::Vec3;
+    use cadcraft_render::{VIEWPORT_CONTENT, build_plot};
+    // 30° corner at (10, 0), half width 0.5: the tip is at about (11.87, -0.5), far past both
+    // bands (x ≤ 10.25).
+    let a = 30f64.to_radians();
+    let mut d = pline(pts(&[(0.0, 0.0), (10.0, 0.0), (10.0 - 10.0 * a.cos(), 10.0 * a.sin())]), false, W);
+    let vp = Viewport {
+        center: Vec3::new(5.0, 4.0, 0.0),
+        width: 8.0,
+        height: 6.0,
+        view_center: Vec2::new(11.4, -0.4),
+        view_height: 0.3,
+        id: 2,
+        locked: false,
+        frozen_layers: Vec::new(),
+        layer_colors: Vec::new(),
+        clip: None,
+        on: true,
+        twist: 0.0,
+    };
+    d.add(&Space::Paper("Layout1".into()), Common::default(), EntityKind::Viewport(vp)).unwrap();
+    let space = Space::Paper("Layout1".into());
+    for l in [build(&d, &space, &Options::default()), build_plot(&d, &space, &Options::default())] {
+        assert!(l.prims.iter().any(|p| p.handle == VIEWPORT_CONTENT && p.kind == Kind::Tris), "the tip is drawn");
+    }
+}

@@ -588,7 +588,58 @@ fn lwpolyline_bounds(p: &LwPolyline) -> Bounds2 {
             }
         }
     }
+    join_tips(p, &mut b);
     b
+}
+
+/// Adds the miter tips where consecutive wide segments of equal width meet, as the renderer
+/// joins them (`cadcraft_geom::outer_join`): a sharp corner's tip reaches well past both bands.
+fn join_tips(p: &LwPolyline, b: &mut Bounds2) {
+    let n = p.vertices.len();
+    let count = if p.closed { n } else { n.saturating_sub(1) };
+    let half = |w: f64| if w.is_finite() && w > 0.0 { w / 2.0 } else { 0.0 };
+    // Per drawn segment: start direction, end direction, start and end half width, end point,
+    // and whether it is an arc.
+    let mut segs: Vec<(Vec2, Vec2, f64, f64, Vec2, bool)> = Vec::with_capacity(count);
+    for i in 0..count {
+        let (Some(v), Some(w)) = (p.vertices.get(i), p.vertices.get((i + 1) % n)) else { continue };
+        if v.p.near(w.p, EPS) {
+            continue; // not drawn, so it joins nothing
+        }
+        let (h0, h1) = if p.const_width > 0.0 { (half(p.const_width), half(p.const_width)) } else { (half(v.start_width), half(v.end_width)) };
+        let (d0, d1, arc) = match bulge_to_arc(v.p, w.p, v.bulge) {
+            None => {
+                let d = (w.p - v.p).normalized();
+                (d, d, false)
+            }
+            Some((a, ccw)) => {
+                let sense = if ccw { 1.0 } else { -1.0 };
+                let tangent = |q: Vec2| ((q - a.center).perp() * sense).normalized();
+                (tangent(v.p), tangent(w.p), true)
+            }
+        };
+        segs.push((d0, d1, h0, h1, w.p, arc));
+    }
+    let pairs = if p.closed { segs.len() } else { segs.len().saturating_sub(1) };
+    for i in 0..pairs {
+        let (Some(a), Some(c)) = (segs.get(i), segs.get((i + 1) % segs.len().max(1))) else { continue };
+        let (hw, hw2) = (a.3, c.2);
+        let scale = hw.max(hw2);
+        if !(hw > 0.0 && hw2 > 0.0) || (hw - hw2).abs() > scale * 1e-9 {
+            continue;
+        }
+        let Some(j) = cadcraft_geom::outer_join(a.4, a.1, c.0, hw) else { continue };
+        if a.5 || c.5 {
+            // Next to an arc the renderer turns along a chord, not the tangent used here, so the
+            // tip may sit a little elsewhere or just under the limit: take it generously.
+            if j.miter <= cadcraft_geom::MITER_LIMIT * 1.05 {
+                let tip = a.4 + j.bis * (hw * j.miter);
+                *b = b.union(&Bounds2::from_points([tip]).expand(hw));
+            }
+        } else if let Some(tip) = j.tip(a.4, hw) {
+            b.add(tip);
+        }
+    }
 }
 
 #[cfg(test)]

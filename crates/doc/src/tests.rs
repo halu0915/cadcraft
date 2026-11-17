@@ -376,6 +376,24 @@ fn wide_polyline_extents_follow_the_band() {
     assert!(near_bounds(b, (0.0, 0.0), (10.0, 0.0)), "{b:?}");
 }
 
+/// A sharp corner's miter tip, drawn by the renderer, is inside the extents; past the miter
+/// limit the corner is bevelled and adds nothing.
+#[test]
+fn wide_polyline_extents_contain_the_miter_tips() {
+    // 30°: the tip is 1/sin(15°) half widths out along the outer bisector.
+    let a = 30f64.to_radians();
+    let b = wide_pline(&[(0.0, 0.0, 0.0, 0.0, 0.0), (10.0, 0.0, 0.0, 0.0, 0.0), (10.0 - 10.0 * a.cos(), 10.0 * a.sin(), 0.0, 0.0, 0.0)], false, 1.0);
+    let tip_x = 10.0 + 0.5 / (a / 2.0).sin() * (a / 2.0).cos();
+    assert!((b.max.x - tip_x).abs() < 1e-9, "{b:?} vs tip x {tip_x}");
+    // A right angle: the tip is the band's square corner, which the bands already reach.
+    let b = wide_pline(&[(0.0, 0.0, 0.0, 0.0, 0.0), (10.0, 0.0, 0.0, 0.0, 0.0), (10.0, 10.0, 0.0, 0.0, 0.0)], false, 1.0);
+    assert!(near_bounds(b, (0.0, -0.5), (10.5, 10.0)), "{b:?}");
+    // 5°: bevelled, so no spike in the extents.
+    let a = 5f64.to_radians();
+    let b = wide_pline(&[(0.0, 0.0, 0.0, 0.0, 0.0), (10.0, 0.0, 0.0, 0.0, 0.0), (10.0 - 10.0 * a.cos(), 10.0 * a.sin(), 0.0, 0.0, 0.0)], false, 1.0);
+    assert!(b.max.x < 10.5, "{b:?}");
+}
+
 /// A wide arc segment reaches its outer edge (radius plus half the width), never less, and only
 /// by the sampling tolerance more.
 #[test]

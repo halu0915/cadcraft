@@ -58,9 +58,6 @@ pub const PATTERN_MM: f64 = 1.0;
 /// a tiny plot scale would otherwise produce unbounded geometry).
 pub const MAX_PATTERN_CELLS: usize = 2_000_000;
 
-/// Miters longer than this many half widths are drawn bevelled (as PDF's default miter limit).
-const MITER_LIMIT: f64 = 10.0;
-
 /// Segments of a half circle (round ends and joins).
 const ROUND_STEPS: usize = 12;
 
@@ -196,27 +193,19 @@ fn cap(out: &mut Vec<Vec2>, p: Vec2, out_dir: Vec2, hw: f64, end: EndStyle) {
 
 /// The corner at `c` between a segment arriving in direction `d0` and one leaving in `d1`.
 pub(crate) fn corner(out: &mut Vec<Vec2>, c: Vec2, d0: Vec2, d1: Vec2, hw: f64, join: JoinStyle) {
-    let turn = d0.cross(d1);
-    if turn.abs() <= 1e-12 && d0.dot(d1) > 0.0 {
-        return; // straight on
-    }
-    // The outer side of the turn: right of a left turn, left of a right turn.
-    let side = if turn > 0.0 { -1.0 } else { 1.0 };
-    let n0 = d0.perp() * (hw * side);
-    let n1 = d1.perp() * (hw * side);
-    let (o0, o1) = (c + n0, c + n1);
-    let bis = (n0 + n1).normalized();
-    // Distance from the corner to the miter tip, in half widths.
-    let cos_half = bis.dot(n0) / hw;
-    let miter = if cos_half > 1e-9 { 1.0 / cos_half } else { f64::INFINITY };
+    // Shared with the extents of wide polylines, which must contain the miter tips drawn here.
+    let Some(j) = cadcraft_geom::outer_join(c, d0, d1, hw) else { return }; // straight on
+    let (o0, o1, bis) = (j.o0, j.o1, j.bis);
+    let (n0, n1) = (o0 - c, o1 - c);
     match join {
         JoinStyle::Bevel => tri(out, c, o0, o1),
-        JoinStyle::Miter if miter <= MITER_LIMIT => {
-            let tip = c + bis * (hw * miter);
-            tri(out, c, o0, tip);
-            tri(out, c, tip, o1);
-        }
-        JoinStyle::Miter => tri(out, c, o0, o1),
+        JoinStyle::Miter => match j.tip(c, hw) {
+            Some(tip) => {
+                tri(out, c, o0, tip);
+                tri(out, c, tip, o1);
+            }
+            None => tri(out, c, o0, o1),
+        },
         JoinStyle::Diamond => {
             // A point one half width out along the bisector, like a diamond end.
             tri(out, c, o0, o1);
