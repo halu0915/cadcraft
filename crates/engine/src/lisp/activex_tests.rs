@@ -813,6 +813,7 @@ fn multiline_attributes_move_along_z() {
         rows: 1,
         col_spacing: 0.0,
         row_spacing: 0.0,
+        clip: None,
     };
     let e = add(&mut s, EntityKind::Insert(ins));
     let h = s.doc().unwrap().model.last().unwrap().handle;
@@ -899,6 +900,7 @@ fn attached_attributes_join_the_block_z_bounds() {
         rows: 1,
         col_spacing: 0.0,
         row_spacing: 0.0,
+        clip: None,
     };
     let e = add(&mut s, EntityKind::Insert(ins));
     ok(&mut s, &format!("(vla-GetBoundingBox (vlax-ename->vla-object {e}) 'lo 'hi)"));

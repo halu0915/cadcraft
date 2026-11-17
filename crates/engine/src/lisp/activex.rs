@@ -186,6 +186,7 @@ fn object_name(kind: &EntityKind) -> &'static str {
         EntityKind::Ellipse(_) => "AcDbEllipse",
         EntityKind::LwPolyline(_) => "AcDbPolyline",
         EntityKind::Polyline3d(_) => "AcDb3dPolyline",
+        EntityKind::PolyfaceMesh(_) => "AcDbPolyFaceMesh",
         EntityKind::Spline(_) => "AcDbSpline",
         EntityKind::Helix(_) => "AcDbHelix",
         EntityKind::Ray(_) => "AcDbRay",
