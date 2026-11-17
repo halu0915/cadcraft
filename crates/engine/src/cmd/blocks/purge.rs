@@ -152,10 +152,11 @@ pub(in crate::cmd) fn used_blocks(d: &Drawing) -> HashSet<String> {
             _ => {}
         }
     }
-    let mut guard = 0;
+    // Each block is walked once (the `used` set), so the work is bounded by the drawing's own
+    // entity count and cyclic references end. No cap on the names popped: a cap stopped the scan
+    // with blocks still waiting, and PURGE then deleted them although they were in use.
     while let Some(n) = frontier.pop() {
-        guard += 1;
-        if guard > 100_000 || !used.insert(n.to_ascii_uppercase()) {
+        if !used.insert(n.to_ascii_uppercase()) {
             continue;
         }
         // A dynamic block reference with values of its own shows an anonymous block (`*U7`)

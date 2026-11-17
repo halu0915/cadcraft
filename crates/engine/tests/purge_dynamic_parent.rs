@@ -80,3 +80,22 @@ fn purge_removes_the_dynamic_block_once_no_anonymous_reference_is_left() {
     purged.sort();
     assert_eq!(purged, ["*U7", "Door", "Hinge", "Unused"], "{r}");
 }
+
+#[test]
+fn purge_keeps_a_used_block_however_many_references_the_drawing_has() {
+    // 100,000 references: the first inserts StillUsed, the rest *U7. Every block reached must
+    // count as in use, however many references were seen before it.
+    let mut s = session();
+    let d = s.doc_mut().unwrap();
+    d.blocks.insert("StillUsed".into(), block("StillUsed", 0x9040, vec![]));
+    for h in d.model.handles() {
+        d.model.remove(h);
+    }
+    d.model.push(Entity::new(Handle(0x10_0000), insert("StillUsed")));
+    for i in 1..100_000u64 {
+        d.model.push(Entity::new(Handle(0x10_0000 + i), insert("*U7")));
+    }
+    let r = s.execute("purge", &json!({ "type": "blocks" })).unwrap();
+    assert_eq!(r["purged"]["blocks"], json!(["Unused"]), "{r}");
+    assert!(s.doc().unwrap().block("StillUsed").is_some());
+}
