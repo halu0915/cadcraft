@@ -133,6 +133,12 @@ fn join_bands(out: &mut Vec<Vec2>, a: BandEnd, b: BandEnd) {
     crate::pen::corner(out, pa, da, db, hwa, cadcraft_doc::JoinStyle::Miter);
 }
 
+/// The unit tangent of `seg` at parameter `t`, or `fallback` where it has none.
+fn end_dir(seg: &cadcraft_geom::Segment, t: f64, fallback: Vec2) -> Vec2 {
+    let d = seg.tangent(t);
+    if d.is_finite() && (d.len() - 1.0).abs() < 1e-6 { d } else { fallback }
+}
+
 /// Triangles for a polyline with widths (constant or tapered per segment). Consecutive segments
 /// of equal width at their shared vertex are joined with a miter (bevelled when very sharp),
 /// including the closing vertex of a closed polyline.
@@ -142,8 +148,10 @@ pub fn wide_polyline(p: &LwPolyline, tol: f64) -> Vec<Vec2> {
     let n = p.vertices.len();
     let mut first_start: Option<BandEnd> = None;
     let mut prev_end: Option<BandEnd> = None;
-    for (i, seg) in pl.segments().iter().enumerate() {
-        let v = p.vertices.get(i % n.max(1)).copied().unwrap_or_default();
+    // The vertex each segment starts at, not its position in the list: zero-length segments are
+    // skipped, and the widths belong to the vertex.
+    for (i, seg) in pl.indexed_segments().iter() {
+        let v = p.vertices.get(*i % n.max(1)).copied().unwrap_or_default();
         let (w0, w1) = if p.const_width > 0.0 { (p.const_width, p.const_width) } else { (v.start_width, v.end_width) };
         let mut pts = Vec::new();
         seg.tessellate(tol, &mut pts);
@@ -155,9 +163,17 @@ pub fn wide_polyline(p: &LwPolyline, tol: f64) -> Vec<Vec2> {
         for (k, q) in pts.iter().enumerate() {
             let t = k as f64 / (m - 1) as f64;
             let w = (w0 + (w1 - w0) * t) / 2.0;
-            let dir = if k + 1 < m { pts.get(k + 1).map(|n| *n - *q) } else { pts.get(k.wrapping_sub(1)).map(|pv| *q - *pv) }
+            let chord = if k + 1 < m { pts.get(k + 1).map(|n| *n - *q) } else { pts.get(k.wrapping_sub(1)).map(|pv| *q - *pv) }
                 .unwrap_or(Vec2::X)
                 .normalized();
+            // At the segment's ends the band ends square to the true tangent (radial on an arc),
+            // and joins use that tangent too: the same directions the extents use
+            // (`cadcraft_doc` LWPOLYLINE bounds), whatever the tessellation tolerance.
+            let dir = match (k == 0, k + 1 == m) {
+                (true, _) => end_dir(seg, 0.0, chord),
+                (_, true) => end_dir(seg, 1.0, chord),
+                _ => chord,
+            };
             if k == 0 {
                 let start = (*q, dir, w);
                 if let Some(end) = prev_end {

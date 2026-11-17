@@ -20,8 +20,9 @@ fn segments(p: &LwPolyline, tol: f64) -> Vec<Vec<Sample>> {
     let pl = Polyline { vertices: p.vertices.clone(), closed: p.closed };
     let n = p.vertices.len();
     let mut out = Vec::new();
-    for (i, seg) in pl.segments().iter().enumerate() {
-        let v = p.vertices.get(i % n.max(1)).copied().unwrap_or_default();
+    // The vertex each segment starts at carries its widths (zero-length segments are skipped).
+    for (i, seg) in pl.indexed_segments().iter() {
+        let v = p.vertices.get(*i % n.max(1)).copied().unwrap_or_default();
         let (w0, w1) = if p.const_width > 0.0 { (p.const_width, p.const_width) } else { (v.start_width, v.end_width) };
         let mut pts = Vec::new();
         seg.tessellate(tol, &mut pts);

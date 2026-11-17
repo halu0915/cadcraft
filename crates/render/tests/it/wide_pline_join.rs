@@ -161,3 +161,93 @@ fn viewport_showing_only_a_miter_tip_draws_it() {
         assert!(l.prims.iter().any(|p| p.handle == VIEWPORT_CONTENT && p.kind == Kind::Tris), "the tip is drawn");
     }
 }
+
+/// The drawn triangles of a single wide polyline and that polyline's extents.
+fn drawn_and_bounds(vs: Vec<PolyVertex>, closed: bool, const_width: f64) -> (Vec<Vec2>, cadcraft_geom::Bounds2) {
+    let mut d = Drawing::new_imperial();
+    let p = LwPolyline { vertices: vs, closed, const_width, elevation: 0.0, plinegen: false };
+    let h = d.add(&Space::Model, Common::default(), EntityKind::LwPolyline(p)).unwrap();
+    let b = cadcraft_doc::entity_bounds(&d, d.entity(h).unwrap(), 0);
+    (tris(&d), b)
+}
+
+/// How far the drawn triangles reach past the extents (0 when inside).
+fn overshoot(t: &[Vec2], b: &cadcraft_geom::Bounds2) -> f64 {
+    t.iter().map(|q| (b.min.x - q.x).max(q.x - b.max.x).max(b.min.y - q.y).max(q.y - b.max.y).max(0.0)).fold(0.0, f64::max)
+}
+
+/// A line into a counter-clockwise quarter arc of radius 5 that leaves at 150°: a sharp corner
+/// next to an arc, whose tip (about (1.87, -0.5) at half width 0.5) is far past both bands.
+fn line_into_sharp_arc() -> Vec<PolyVertex> {
+    let mut vs = pts(&[(-10.0, 0.0), (0.0, 0.0), (-2.5 - 5.0 * 0.866_025_403_784_438_6, -4.330_127_018_922_193 + 2.5)]);
+    vs[1].bulge = (std::f64::consts::FRAC_PI_2 / 4.0).tan();
+    vs
+}
+
+#[test]
+fn joins_next_to_arcs_stay_inside_the_extents() {
+    // The arc band's own sampling may sit a hair outside (it predates the joins); a join tip
+    // found along a different direction than the extents use would miss by tenths.
+    let (t, b) = drawn_and_bounds(line_into_sharp_arc(), false, W);
+    assert!(overshoot(&t, &b) < 0.01, "{} past {b:?}", overshoot(&t, &b));
+    assert!(b.max.x > 1.8, "the tip is in the extents: {b:?}");
+    // A tiny arc (radius 0.1) turning back 176°: past the miter limit along the tangent, so
+    // bevelled in both, however finely the arc is cut into chords.
+    let mut vs = pts(&[(-10.0, 0.0), (0.0, 0.0), (-0.092_780_757_651_569_87, 0.106_732_052_400_394_96)]);
+    vs[1].bulge = (-std::f64::consts::FRAC_PI_2 / 4.0).tan();
+    let (t, b) = drawn_and_bounds(vs, false, 0.1);
+    assert!(overshoot(&t, &b) < 0.01, "{} past {b:?}", overshoot(&t, &b));
+}
+
+#[test]
+fn viewport_showing_only_a_miter_tip_next_to_an_arc_draws_it() {
+    use cadcraft_doc::Viewport;
+    use cadcraft_geom::Vec3;
+    use cadcraft_render::{VIEWPORT_CONTENT, build_plot};
+    let mut d = pline(line_into_sharp_arc(), false, W);
+    let vp = Viewport {
+        center: Vec3::new(5.0, 4.0, 0.0),
+        width: 8.0,
+        height: 6.0,
+        view_center: Vec2::new(1.4, -0.44),
+        view_height: 0.1,
+        id: 2,
+        locked: false,
+        frozen_layers: Vec::new(),
+        layer_colors: Vec::new(),
+        clip: None,
+        on: true,
+        twist: 0.0,
+    };
+    d.add(&Space::Paper("Layout1".into()), Common::default(), EntityKind::Viewport(vp)).unwrap();
+    let space = Space::Paper("Layout1".into());
+    for l in [build(&d, &space, &Options::default()), build_plot(&d, &space, &Options::default())] {
+        assert!(l.prims.iter().any(|p| p.handle == VIEWPORT_CONTENT && p.kind == Kind::Tris), "the tip is drawn");
+    }
+}
+
+#[test]
+fn a_repeated_vertex_does_not_shift_the_widths() {
+    // The repeated (10, 0) starts no segment; the 30° leg's widths are its own (2), not the
+    // first leg's (1). Unequal widths at the corner: no join, and nothing past the extents.
+    let mut vs = pts(&[(0.0, 0.0), (10.0, 0.0), (10.0, 0.0), (10.0 - 10.0 * 30f64.to_radians().cos(), 10.0 * 30f64.to_radians().sin())]);
+    for (i, v) in vs.iter_mut().enumerate() {
+        let w = if i == 2 { 2.0 } else { 1.0 };
+        (v.start_width, v.end_width) = (w, w);
+    }
+    let (t, b) = drawn_and_bounds(vs.clone(), false, 0.0);
+    assert!(overshoot(&t, &b) < 1e-9, "{} past {b:?}", overshoot(&t, &b));
+    assert!(b.max.x < 10.6, "no tip: {b:?}");
+    // The 30° leg is drawn 2 wide: a point 0.9 from its centre line is covered.
+    let mid = Vec2::new(10.0 - 5.0 * 30f64.to_radians().cos(), 5.0 * 30f64.to_radians().sin());
+    let nrm = Vec2::new(-30f64.to_radians().sin(), -30f64.to_radians().cos());
+    assert!(covered(&t, mid + nrm * 0.9), "second leg keeps its own width");
+    // The same with equal widths joins, and the tip is inside the extents; closed too.
+    for v in &mut vs {
+        (v.start_width, v.end_width) = (1.0, 1.0);
+    }
+    let (t, b) = drawn_and_bounds(vs.clone(), false, 0.0);
+    assert!(overshoot(&t, &b) < 1e-9 && b.max.x > 11.8, "{b:?}");
+    let (t, b) = drawn_and_bounds(vs, true, 0.0);
+    assert!(overshoot(&t, &b) < 1e-9, "closed: {} past {b:?}", overshoot(&t, &b));
+}
