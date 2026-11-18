@@ -1,4 +1,5 @@
 mod aci7_display;
+mod annotative_orientation;
 mod annotative_viewport;
 mod dim_angular_centre;
 mod dim_post_tolerance;
@@ -14,5 +15,6 @@ mod psltscale;
 mod raster_points;
 mod render_props;
 mod viewport_frozen_layer;
+mod wide_pline_join;
 mod wide_pline_linetype;
 mod wipeout_mask;

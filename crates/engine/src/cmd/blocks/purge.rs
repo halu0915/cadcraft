@@ -127,8 +127,9 @@ pub(in crate::cmd) fn override_arrows(dm: &cadcraft_doc::Dimension) -> impl Iter
         .filter(|n| !n.is_empty())
 }
 
-/// Upper-case names of blocks reachable from model space, the layouts and dimensions, and the
-/// arrowhead blocks dimension styles and dimension overrides name.
+/// Upper-case names of blocks reachable from model space, the layouts and dimensions, the
+/// arrowhead blocks dimension styles and dimension overrides name, and the dynamic blocks the
+/// anonymous blocks among them stand for.
 pub(in crate::cmd) fn used_blocks(d: &Drawing) -> HashSet<String> {
     let mut used = HashSet::new();
     let mut frontier: Vec<String> = Vec::new();
@@ -151,12 +152,17 @@ pub(in crate::cmd) fn used_blocks(d: &Drawing) -> HashSet<String> {
             _ => {}
         }
     }
-    let mut guard = 0;
+    // Each block is walked once (the `used` set), so the work is bounded by the drawing's own
+    // entity count and cyclic references end. No cap on the names popped: a cap stopped the scan
+    // with blocks still waiting, and PURGE then deleted them although they were in use.
     while let Some(n) = frontier.pop() {
-        guard += 1;
-        if guard > 100_000 || !used.insert(n.to_ascii_uppercase()) {
+        if !used.insert(n.to_ascii_uppercase()) {
             continue;
         }
+        // A dynamic block reference with values of its own shows an anonymous block (`*U7`)
+        // whose record names the dynamic block: that block is in use too, or purging it would
+        // leave every such reference without its dynamic definition.
+        frontier.extend(super::bedit::dynamic_definition(d, &n));
         if let Some(b) = d.block(&n) {
             for e in b.entities.iter() {
                 match &e.kind {
@@ -197,7 +203,21 @@ pub(in crate::cmd) fn candidates(d: &Drawing, kind: Kind) -> Vec<String> {
                 .collect()
         }
         Kind::Linetypes => {
-            let used = lower(&mut entities(d).map(|e| e.common.linetype.clone()).chain(d.layers.iter().map(|l| l.linetype.clone())));
+            // Objects and layers use linetypes, and so do dimension styles and a dimension's own
+            // overrides (DIMLTYPE, DIMLTEX1, DIMLTEX2), and multiline styles' elements.
+            let styles = d.dim_styles.iter().flat_map(|s| [s.dim_linetype.clone(), s.ext_linetype1.clone(), s.ext_linetype2.clone()]);
+            let overrides = entities(d).filter_map(|e| if let EntityKind::Dimension(dm) = &e.kind { Some(dm) } else { None }).flat_map(|dm| {
+                ["dimLinetype", "extLinetype1", "extLinetype2"].into_iter().filter_map(|k| dm.overrides.get(k)?.as_str().map(str::to_string))
+            });
+            let mlines = d.mline_styles.iter().flat_map(|s| s.elements.iter().map(|el| el.linetype.clone()));
+            let used = lower(
+                &mut entities(d)
+                    .map(|e| e.common.linetype.clone())
+                    .chain(d.layers.iter().map(|l| l.linetype.clone()))
+                    .chain(styles)
+                    .chain(overrides)
+                    .chain(mlines),
+            );
             let cur = d.header.str("CELTYPE", "ByLayer");
             d.linetypes
                 .iter()
@@ -218,6 +238,7 @@ pub(in crate::cmd) fn candidates(d: &Drawing, kind: Kind) -> Vec<String> {
             let used = lower(&mut entities(d).filter_map(|e| match &e.kind {
                 EntityKind::Dimension(dm) => Some(dm.style.clone()),
                 EntityKind::Tolerance(t) => Some(t.style.clone()),
+                EntityKind::Leader(l) => Some(l.style.clone()),
                 _ => None,
             }));
             let cur = d.header.str("DIMSTYLE", "Standard");
@@ -297,6 +318,41 @@ fn retain<T>(v: &mut Vec<T>, name: impl Fn(&T) -> &String, n: &str) -> bool {
     let before = v.len();
     v.retain(|t| !name(t).eq_ignore_ascii_case(n));
     v.len() != before
+}
+
+/// Most passes [`purge_unused`] makes: each can free what the last one's objects used (a nested
+/// block, its layer, that layer's linetype).
+const MAX_PASSES: usize = 64;
+
+/// Remove every named object drawing `d` doesn't use, as PURGE All would, nested ones included;
+/// the defaults and the current ones stay. For a drawing being written (WBLOCK's), not the one
+/// being edited: nothing goes through the session or its undo.
+pub(in crate::cmd) fn purge_unused(d: &mut Drawing) {
+    for _ in 0..MAX_PASSES {
+        let mut removed = false;
+        for kind in ALL {
+            for name in candidates(d, *kind) {
+                removed |= match kind {
+                    Kind::Blocks => {
+                        let key = d.blocks.keys().find(|k| k.eq_ignore_ascii_case(&name)).cloned();
+                        key.is_some_and(|k| d.blocks.remove(&k).is_some())
+                    }
+                    Kind::Layers => retain(&mut d.layers, |l| &l.name, &name),
+                    Kind::TextStyles => retain(&mut d.text_styles, |t| &t.name, &name),
+                    Kind::Linetypes => retain(&mut d.linetypes, |t| &t.name, &name),
+                    Kind::Dimstyles => retain(&mut d.dim_styles, |t| &t.name, &name),
+                    Kind::MleaderStyles => retain(&mut d.mleader_styles, |t| &t.name, &name),
+                    Kind::MlineStyles => retain(&mut d.mline_styles, |t| &t.name, &name),
+                    Kind::TableStyles => retain(&mut d.table_styles, |t| &t.name, &name),
+                    Kind::Groups => retain(&mut d.groups, |g| &g.name, &name),
+                    Kind::ZeroLength | Kind::EmptyText | Kind::Absent | Kind::All => false,
+                };
+            }
+        }
+        if !removed {
+            break;
+        }
+    }
 }
 
 /// Model-space and layout objects with no length, or text with no characters.
