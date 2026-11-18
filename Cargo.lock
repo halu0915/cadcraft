@@ -1192,7 +1192,7 @@ source = "git+https://github.com/storytold/craft-libs?rev=92d392cff132eaf53e13af
 [[package]]
 name = "craft-dwg"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=7bb6c90076a0177d01cc4c482e7fd8dc9f31a8bf#7bb6c90076a0177d01cc4c482e7fd8dc9f31a8bf"
+source = "git+https://github.com/halu0915/craft-libs?rev=f28fae72bdbfcd23de385a9a537a424832c5591a#f28fae72bdbfcd23de385a9a537a424832c5591a"
 dependencies = [
  "acadrust",
  "log",
