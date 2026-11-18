@@ -496,6 +496,11 @@ impl Polyline {
     }
     /// The segments, including the closing segment when closed.
     pub fn segments(&self) -> Vec<Segment> {
+        self.indexed_segments().into_iter().map(|(_, s)| s).collect()
+    }
+    /// The segments with the index of the vertex each starts at (which carries its bulge and
+    /// widths). Zero-length segments are skipped, so the index is not the position in the list.
+    pub fn indexed_segments(&self) -> Vec<(usize, Segment)> {
         let n = self.vertices.len();
         let mut out = Vec::with_capacity(n);
         let count = if self.closed { n } else { n.saturating_sub(1) };
@@ -505,8 +510,8 @@ impl Polyline {
                 continue;
             }
             match bulge_to_arc(v.p, w.p, v.bulge) {
-                Some((arc, ccw)) => out.push(Segment::Arc { arc, ccw }),
-                None => out.push(Segment::Line(Line::new(v.p, w.p))),
+                Some((arc, ccw)) => out.push((i, Segment::Arc { arc, ccw })),
+                None => out.push((i, Segment::Line(Line::new(v.p, w.p)))),
             }
         }
         out
