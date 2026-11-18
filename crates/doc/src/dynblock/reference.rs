@@ -110,6 +110,12 @@ fn value(o: &ForeignObject) -> Option<Value> {
 /// The dynamic block reference `insert` is, or `None` when it isn't one.
 pub fn reference(d: &Drawing, insert: Handle) -> Option<Reference> {
     let EntityKind::Insert(ins) = &d.entity(insert)?.kind else { return None };
+    reference_of(d, insert, ins)
+}
+
+/// [`reference`] for block reference `ins` with handle `insert`, found wherever it is: in a
+/// space, or inside a block definition, where [`Drawing::entity`] doesn't look.
+pub fn reference_of(d: &Drawing, insert: Handle, ins: &crate::Insert) -> Option<Reference> {
     let objects = objects(d);
     let rep = d.foreign.entities.get(&insert).and_then(|x| x.xdict).and_then(|x| entry(&objects, x, "AcDbBlockRepresentation"));
     let Some(rep) = rep else {

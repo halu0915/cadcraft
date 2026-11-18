@@ -1159,3 +1159,125 @@ fn tiny_plan_extent_keeps_height_interpolation() {
     pt(&mut s, "(vlax-invoke st 'IntersectWith fl acExtendNone)", [5e-9, 0.0, 1.0]);
     pt(&mut s, "(vlax-invoke fl 'IntersectWith st acExtendNone)", [5e-9, 0.0, 1.0]);
 }
+
+/// A box whose height can be measured comes back at that height: a hatch at elevation 5 and a
+/// helix rising 10 from Z 5. Before, both came back at Z 0.
+#[test]
+fn bounding_boxes_take_the_elevation_of_hatches_and_helixes() {
+    let mut s = session();
+    ok(&mut s, "(command \"_.RECTANG\" \"0,0\" \"4,3\")");
+    ok(&mut s, "(command \"_.-HATCH\" \"_S\" (entlast) \"\" \"\")");
+    let hatch = {
+        let d = s.doc_mut().unwrap();
+        let h = d.model.iter().find(|e| matches!(e.kind, EntityKind::Hatch(_))).map(|e| e.handle).expect("a hatch");
+        d.modify_entity(h, |e| {
+            if let EntityKind::Hatch(x) = &mut e.kind {
+                x.elevation = 5.0;
+            }
+        })
+        .unwrap();
+        format!("(handent \"{}\")", h.hex())
+    };
+    s.touch();
+    ok(&mut s, &format!("(vla-GetBoundingBox (vlax-ename->vla-object {hatch}) 'lo 'hi)"));
+    assert_eq!(ok(&mut s, "(list (caddr (vlax-safearray->list lo)) (caddr (vlax-safearray->list hi)))"), "(5.0 5.0)");
+    let helix = add(
+        &mut s,
+        EntityKind::Helix(cadcraft_doc::Helix {
+            center: Vec3::new(0.0, 0.0, 5.0),
+            base_radius: 1.0,
+            top_radius: 1.0,
+            height: 10.0,
+            turns: 3.0,
+            start_angle: 0.0,
+            ccw: true,
+            constrain: Default::default(),
+        }),
+    );
+    ok(&mut s, &format!("(vla-GetBoundingBox (vlax-ename->vla-object {helix}) 'lo 'hi)"));
+    assert_eq!(ok(&mut s, "(list (caddr (vlax-safearray->list lo)) (caddr (vlax-safearray->list hi)))"), "(5.0 15.0)");
+}
+
+/// An object whose height can't be measured (one kept only as another program's data) gets an
+/// error, not a box at Z 0, and so does a block reference holding one.
+#[test]
+fn bounding_boxes_refuse_what_they_cannot_measure_in_z() {
+    let mut s = session();
+    let unknown = EntityKind::Unknown(cadcraft_doc::Unknown { dxf_type: "ACME_THING".into(), tags: Vec::new() });
+    let e = add(&mut s, unknown.clone());
+    // No plan extents either: still an error, never a box.
+    assert!(eval(&mut s, &format!("(vla-GetBoundingBox (vlax-ename->vla-object {e}) 'lo 'hi)")).is_err());
+    ok(&mut s, r#"(entmake '((0 . "BLOCK") (2 . "HOLDS") (70 . 0) (10 0.0 0.0 0.0)))"#);
+    ok(&mut s, r#"(entmake '((0 . "LINE") (10 0.0 0.0 0.0) (11 1.0 1.0 0.0)))"#);
+    ok(&mut s, r#"(entmake '((0 . "ENDBLK")))"#);
+    {
+        let d = s.doc_mut().unwrap();
+        let mut b = (**d.blocks.get("HOLDS").unwrap()).clone();
+        b.entities.push(cadcraft_doc::Entity::new(cadcraft_doc::Handle(0xBEEF), unknown));
+        d.blocks.insert("HOLDS".into(), std::sync::Arc::new(b));
+    }
+    ok(&mut s, r#"(entmake '((0 . "INSERT") (2 . "HOLDS") (10 0.0 0.0 7.0)))"#);
+    let err = eval(&mut s, "(vla-GetBoundingBox (vlax-ename->vla-object (entlast)) 'lo 'hi)").unwrap_err();
+    assert!(err.contains("not available yet"), "{err}");
+}
+
+/// A drawing with dynamic block "Door" (an evaluation graph in its extension dictionary), an
+/// anonymous block `*U7` whose record's `AcDbBlockRepBTag` names Door's record, and block
+/// "Outer" holding a reference to Door.
+fn dynamic_session() -> Session {
+    use cadcraft_doc::foreign::{Foreign, ForeignExtra, ForeignObject};
+    use cadcraft_doc::{Block, Entity, Handle, Insert, RawTag};
+    let mut s = session();
+    let d = s.doc_mut().unwrap();
+    let block = |name: &str, h: u64, kind: EntityKind| {
+        let mut b = Block::new(name);
+        b.anonymous = name.starts_with('*');
+        b.entities.push(Entity::new(Handle(h), kind));
+        std::sync::Arc::new(b)
+    };
+    let circle = || EntityKind::Circle(Circle { center: Vec3::ZERO, radius: 0.5 });
+    let insert = |name: &str| EntityKind::Insert(Insert { block: name.into(), ..Insert::default() });
+    d.blocks.insert("Door".into(), block("Door", 0x9010, circle()));
+    d.blocks.insert("*U7".into(), block("*U7", 0x9020, circle()));
+    d.blocks.insert("Outer".into(), block("Outer", 0x9030, insert("Door")));
+    d.blocks.insert("Plain".into(), block("Plain", 0x9040, circle()));
+    let tag = |code, value: &str| RawTag { code, value: value.into() };
+    let mut f = Foreign::default();
+    f.records.insert(("BLOCK_RECORD".into(), "DOOR".into()), ForeignExtra { xdict: Some(Handle(0xF00)), ..Default::default() });
+    f.records.insert(
+        ("BLOCK_RECORD".into(), "*U7".into()),
+        ForeignExtra { xdata: vec![tag(1001, "AcDbBlockRepBTag"), tag(1070, "1"), tag(1005, "1D")], ..Default::default() },
+    );
+    f.targets.insert(Handle(0x1D), ("BLOCK_RECORD".into(), "DOOR".into()));
+    let obj = |handle: u64, kind: &str, tags: &[(i32, &str)]| ForeignObject {
+        handle: Handle(handle),
+        kind: kind.into(),
+        tags: tags.iter().map(|(c, v)| tag(*c, v)).collect(),
+    };
+    f.objects.push(obj(0xF00, "DICTIONARY", &[(100, "AcDbDictionary"), (3, "ACAD_ENHANCEDBLOCK"), (360, "F01")]));
+    f.objects.push(obj(0xF01, "ACAD_EVALUATION_GRAPH", &[(100, "AcDbEvalGraph"), (91, "0"), (95, "1")]));
+    d.foreign = std::sync::Arc::new(f);
+    d.model.push(Entity::new(Handle(0xA000), insert("*U7")));
+    d.model.push(Entity::new(Handle(0xA001), insert("Plain")));
+    s.touch();
+    s
+}
+
+/// IsDynamicBlock and EffectiveName see a dynamic block reference inside a block definition, and
+/// an anonymous reference known only through its record's `AcDbBlockRepBTag`.
+#[test]
+fn dynamic_block_references_are_recognised_in_blocks_and_through_their_anonymous_block() {
+    let mut s = dynamic_session();
+    assert!(cadcraft_doc::dynblock::dynamic_block(s.doc().unwrap(), "Door").is_some(), "the fixture's Door is dynamic");
+    ok(&mut s, "(setq blocks (vla-get-Blocks (vla-get-ActiveDocument (vlax-get-acad-object))))");
+    ok(&mut s, "(vlax-for x (vla-item blocks \"Outer\") (setq inner x))");
+    assert_eq!(ok(&mut s, "(vla-get-ObjectName inner)"), "\"AcDbBlockReference\"");
+    assert_eq!(ok(&mut s, "(vla-get-IsDynamicBlock inner)"), ":VLAX-TRUE", "a dynamic reference inside a block");
+    assert_eq!(ok(&mut s, "(vla-get-EffectiveName inner)"), "\"Door\"");
+    let anon = "(vlax-ename->vla-object (handent \"A000\"))";
+    assert_eq!(ok(&mut s, &format!("(vla-get-IsDynamicBlock {anon})")), ":VLAX-TRUE", "an anonymous *U reference");
+    assert_eq!(ok(&mut s, &format!("(vla-get-EffectiveName {anon})")), "\"Door\"");
+    let plain = "(vlax-ename->vla-object (handent \"A001\"))";
+    assert_eq!(ok(&mut s, &format!("(vla-get-IsDynamicBlock {plain})")), ":VLAX-FALSE");
+    assert_eq!(ok(&mut s, &format!("(vla-get-EffectiveName {plain})")), "\"Plain\"");
+}

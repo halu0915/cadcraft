@@ -266,12 +266,22 @@ fn writable_entity(d: &Drawing, o: &Vla) -> Result<Arc<Entity>, LispError> {
 }
 
 /// A block reference's block name as the user knows it: a dynamic block's own name for the
-/// anonymous block (`*U12`) a reference with values of its own shows.
-fn effective_name(d: &Drawing, h: Handle, block: &str) -> String {
-    if let Some(r) = cadcraft_doc::dynblock::reference(d, h) {
+/// anonymous block (`*U12`) a reference with values of its own shows. The reference may be in a
+/// space or inside a block definition.
+fn effective_name(d: &Drawing, h: Handle, ins: &cadcraft_doc::Insert) -> String {
+    if let Some(r) = cadcraft_doc::dynblock::reference_of(d, h, ins) {
         return r.definition;
     }
-    crate::cmd::blocks::bedit::dynamic_definition(d, block).unwrap_or_else(|| d.block(block).map_or_else(|| block.to_string(), |b| b.name.clone()))
+    crate::cmd::blocks::bedit::dynamic_definition(d, &ins.block)
+        .unwrap_or_else(|| d.block(&ins.block).map_or_else(|| ins.block.clone(), |b| b.name.clone()))
+}
+
+/// Whether a block reference (in a space or inside a block definition) is a dynamic block's:
+/// through its representation, a dynamic block named directly, or an anonymous block whose
+/// `AcDbBlockRepBTag` names one.
+fn is_dynamic_reference(d: &Drawing, h: Handle, ins: &cadcraft_doc::Insert) -> bool {
+    cadcraft_doc::dynblock::reference_of(d, h, ins).is_some()
+        || crate::cmd::blocks::bedit::dynamic_definition(d, &ins.block).is_some_and(|name| cadcraft_doc::dynblock::dynamic_block(d, &name).is_some())
 }
 
 /// The members of a collection, for `vlax-for`.
@@ -431,14 +441,14 @@ fn entity_get(d: &Drawing, e: &Entity, p: &str) -> P {
         "OBJECTID" => Value::Int(e.handle.0 as i32),
         _ => match (&e.kind, p) {
             (EntityKind::Insert(i), "NAME") => Value::str(&i.block),
-            (EntityKind::Insert(i), "EFFECTIVENAME") => Value::str(&effective_name(d, e.handle, &i.block)),
+            (EntityKind::Insert(i), "EFFECTIVENAME") => Value::str(&effective_name(d, e.handle, i)),
             (EntityKind::Insert(i), "INSERTIONPOINT") => point_sa(i.insert),
             (EntityKind::Insert(i), "ROTATION") => Value::Real(i.rotation),
             (EntityKind::Insert(i), "XSCALEFACTOR") => Value::Real(i.scale.x),
             (EntityKind::Insert(i), "YSCALEFACTOR") => Value::Real(i.scale.y),
             (EntityKind::Insert(i), "ZSCALEFACTOR") => Value::Real(i.scale.z),
             (EntityKind::Insert(i), "HASATTRIBUTES") => vbool(!i.attribs.is_empty()),
-            (EntityKind::Insert(_), "ISDYNAMICBLOCK") => vbool(cadcraft_doc::dynblock::reference(d, e.handle).is_some()),
+            (EntityKind::Insert(i), "ISDYNAMICBLOCK") => vbool(is_dynamic_reference(d, e.handle, i)),
             (EntityKind::Line(l), "STARTPOINT") => point_sa(l.a),
             (EntityKind::Line(l), "ENDPOINT") => point_sa(l.b),
             (EntityKind::Line(l), "ANGLE") => Value::Real(cadcraft_geom::norm_angle(l.a.xy().angle_to(l.b.xy()))),
@@ -827,7 +837,12 @@ fn invoke(ctx: &mut Ctx<'_>, o: &Vla, m: &str, args: &[Value], as_lists: bool) -
             if b.is_empty() || !b.min.is_finite() || !b.max.is_finite() {
                 return Err(automation("Null extents"));
             }
-            let (z0, z1) = z_range(d, &e, 0);
+            let Some((z0, z1)) = z_range(d, &e, 0) else {
+                return Err(LispError::new(format!(
+                    "GetBoundingBox of {} is not available yet: its Z extent can't be measured",
+                    object_name(&e.kind)
+                )));
+            };
             ctx.env.set(lo, out(point_sa(Vec3::new(b.min.x, b.min.y, z0))));
             ctx.env.set(hi, out(point_sa(Vec3::new(b.max.x, b.max.y, z1))));
             Ok(Value::Nil)
@@ -998,54 +1013,125 @@ fn z_at(e: &Entity, p: Vec2) -> f64 {
 /// The lowest and highest z of an entity's geometry (bounding boxes are measured in plan). A
 /// block reference spans its contents' z, scaled and lifted to where it is inserted; nesting is
 /// followed to [`cadcraft_doc::MAX_BLOCK_DEPTH`]. Each block's contents are measured once per
-/// depth, so many references to shared nested blocks stay linear.
-fn z_range(d: &Drawing, e: &Entity, depth: usize) -> (f64, f64) {
+/// depth, so many references to shared nested blocks stay linear. `None` when the span can't be
+/// measured (an object of a kind CADCraft keeps only as data, a tilted ellipse or construction
+/// line, or a block holding one): `GetBoundingBox` then reports that rather than a box at Z 0.
+fn z_range(d: &Drawing, e: &Entity, depth: usize) -> Option<(f64, f64)> {
     z_range_cached(d, e, depth, &mut HashMap::new())
 }
 
 /// A block's contents' z span, by block name and nesting depth.
 type ZCache = HashMap<(String, usize), Option<(f64, f64)>>;
 
-fn z_range_cached(d: &Drawing, e: &Entity, depth: usize, cache: &mut ZCache) -> (f64, f64) {
-    let span = |zs: &mut dyn Iterator<Item = f64>| zs.fold(None, |r: Option<(f64, f64)>, z| Some(r.map_or((z, z), |(a, b)| (a.min(z), b.max(z)))));
+/// The span of some z values (`None` for none).
+fn z_span(zs: impl IntoIterator<Item = f64>) -> Option<(f64, f64)> {
+    zs.into_iter().fold(None, |r: Option<(f64, f64)>, z| Some(r.map_or((z, z), |(a, b)| (a.min(z), b.max(z)))))
+}
+
+/// A text's z: its insertion and alignment points.
+fn text_z(t: &cadcraft_doc::Text) -> Option<(f64, f64)> {
+    z_span(std::iter::once(t.insert.z).chain(t.align_pt.map(|p| p.z)))
+}
+
+/// An attribute's z (a multiline attribute draws from its multiline text).
+fn attrib_z(a: &cadcraft_doc::Attrib) -> Option<(f64, f64)> {
+    a.multiline.as_ref().map_or_else(|| text_z(&a.text), |m| Some((m.mtext.insert.z, m.mtext.insert.z)))
+}
+
+fn z_range_cached(d: &Drawing, e: &Entity, depth: usize, cache: &mut ZCache) -> Option<(f64, f64)> {
+    // Geometry CADCraft keeps in plan (splines, region and hatch loops, wipeout boundaries) lies
+    // at Z 0 or at the object's elevation.
     let r = match &e.kind {
-        EntityKind::Line(l) => span(&mut [l.a.z, l.b.z].into_iter()),
-        EntityKind::Polyline3d(p) => span(&mut p.points.iter().map(|q| q.z)),
-        EntityKind::Solid(s) | EntityKind::Trace(s) => span(&mut s.corners.iter().map(|q| q.z)),
-        EntityKind::Face3d(f) => span(&mut f.corners.iter().map(|q| q.z)),
-        EntityKind::Insert(i) if depth < cadcraft_doc::MAX_BLOCK_DEPTH => d
-            .block(&i.block)
-            .and_then(|b| {
-                let key = (i.block.clone(), depth);
-                let inner = match cache.get(&key) {
-                    Some(r) => *r,
-                    None => {
-                        let r = b
-                            .entities
-                            .iter()
-                            .map(|c| z_range_cached(d, c, depth + 1, cache))
-                            .fold(None, |r: Option<(f64, f64)>, (lo, hi)| Some(r.map_or((lo, hi), |(a, z)| (a.min(lo), z.max(hi)))));
-                        cache.insert(key, r);
-                        r
+        EntityKind::Line(l) => z_span([l.a.z, l.b.z]),
+        EntityKind::Point(p) => Some((p.p.z, p.p.z)),
+        EntityKind::Circle(c) => Some((c.center.z, c.center.z)),
+        EntityKind::Arc(a) => Some((a.center.z, a.center.z)),
+        // In plan when its major axis is; a tilted one would need its normal.
+        EntityKind::Ellipse(el) if el.major.z == 0.0 => Some((el.center.z, el.center.z)),
+        EntityKind::Ellipse(_) => None,
+        EntityKind::LwPolyline(p) => Some((p.elevation, p.elevation)),
+        EntityKind::Hatch(h) => Some((h.elevation, h.elevation)),
+        EntityKind::Polyline3d(p) => z_span(p.points.iter().map(|q| q.z)),
+        EntityKind::PolyfaceMesh(m) => z_span(m.vertices.iter().map(|q| q.z)),
+        EntityKind::Spline(_) | EntityKind::Region(_) | EntityKind::Wipeout(_) => Some((0.0, 0.0)),
+        EntityKind::Helix(h) => z_span([h.center.z, h.center.z + h.height]),
+        // Bounded only along a plan direction (an unbounded Z span has no box).
+        EntityKind::Ray(r) | EntityKind::XLine(r) => (r.dir.z == 0.0).then_some((r.base.z, r.base.z)),
+        EntityKind::Text(t) => text_z(t),
+        EntityKind::MText(t) => Some((t.insert.z, t.insert.z)),
+        EntityKind::AttDef(a) => attrib_z(a),
+        EntityKind::Dimension(dm) => z_span([dm.defpt.z, dm.text_mid.z]),
+        EntityKind::MLine(m) => z_span(m.vertices.iter().map(|v| v.p.z)),
+        EntityKind::Leader(l) => z_span(l.vertices.iter().map(|q| q.z)),
+        EntityKind::MLeader(m) => {
+            let zs = m.leaders.iter().flatten().map(|q| q.z).chain([m.landing.z]).chain(m.text.as_ref().map(|t| t.insert.z));
+            let pts = z_span(zs);
+            match &m.block {
+                // The arrow block's contents are measured as a block reference would be.
+                Some(i) => {
+                    let block = z_range_cached(d, &Entity { kind: EntityKind::Insert(i.clone()), ..e.clone() }, depth, cache)?;
+                    z_span(pts.into_iter().flat_map(|(a, b)| [a, b]).chain([block.0, block.1]))
+                }
+                None => pts,
+            }
+        }
+        EntityKind::Solid(s) | EntityKind::Trace(s) => z_span(s.corners.iter().map(|q| q.z)),
+        EntityKind::Face3d(f) => z_span(f.corners.iter().map(|q| q.z)),
+        EntityKind::Viewport(v) => Some((v.center.z, v.center.z)),
+        EntityKind::Image(im) => {
+            let (u, v) = (im.u * im.size.x, im.v * im.size.y);
+            z_span([im.insert.z, im.insert.z + u.z, im.insert.z + v.z, im.insert.z + u.z + v.z])
+        }
+        EntityKind::Table(t) => Some((t.insert.z, t.insert.z)),
+        EntityKind::Tolerance(t) => (t.dir.z == 0.0).then_some((t.insert.z, t.insert.z)),
+        EntityKind::Insert(i) => {
+            if depth >= cadcraft_doc::MAX_BLOCK_DEPTH {
+                return None;
+            }
+            let b = d.block(&i.block)?;
+            let key = (i.block.clone(), depth);
+            let inner = match cache.get(&key) {
+                Some(r) => *r,
+                None => {
+                    // Every object of the block must be measurable: one that isn't leaves the
+                    // reference unmeasured rather than measured without it.
+                    let mut r: Option<(f64, f64)> = None;
+                    let mut ok = true;
+                    for c in b.entities.iter() {
+                        match z_range_cached(d, c, depth + 1, cache) {
+                            Some((lo, hi)) => r = Some(r.map_or((lo, hi), |(a, z)| (a.min(lo), z.max(hi)))),
+                            None => {
+                                ok = false;
+                                break;
+                            }
+                        }
                     }
-                }?;
-                let place = |z: f64| i.insert.z + i.scale.z * (z - b.base.z);
-                let (p, q) = (place(inner.0), place(inner.1));
+                    let r = if ok { r } else { None };
+                    cache.insert(key, r);
+                    r
+                }
+            };
+            let place = |z: f64| i.insert.z + i.scale.z * (z - b.base.z);
+            // An empty block: the reference's own insertion point.
+            let (lo, hi) = inner.map_or(Some((i.insert.z, i.insert.z)), |(p, q)| {
+                let (p, q) = (place(p), place(q));
                 Some((p.min(q), p.max(q)))
-            })
-            .map(|(lo, hi)| {
+            })?;
+            if b.entities.is_empty() || inner.is_some() {
                 // Attached attributes sit where they are, not in the definition.
-                i.attribs.iter().filter(|a| !a.invisible).fold((lo, hi), |(lo, hi), a| {
-                    let z = a.multiline.as_ref().map_or(a.text.insert.z, |m| m.mtext.insert.z);
-                    (lo.min(z), hi.max(z))
-                })
-            }),
-        _ => None,
+                let mut span = (lo, hi);
+                for a in i.attribs.iter().filter(|a| !a.invisible) {
+                    let (alo, ahi) = attrib_z(a)?;
+                    span = (span.0.min(alo), span.1.max(ahi));
+                }
+                Some(span)
+            } else {
+                None
+            }
+        }
+        EntityKind::Unknown(_) => None,
     };
-    r.filter(|(a, b)| a.is_finite() && b.is_finite()).unwrap_or_else(|| {
-        let z = entity_z(e);
-        (z, z)
-    })
+    r.filter(|(a, b)| a.is_finite() && b.is_finite())
 }
 
 /// Move an entity along Z by `dz` (`EntityKind::transform` is 2D). `false` for a kind this
