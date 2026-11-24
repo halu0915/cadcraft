@@ -187,7 +187,7 @@ fn the_metafile_is_found_through_its_wrappers() {
 
 #[test]
 fn the_picture_plays_lines_fills_and_text() {
-    let pic = picture(&sample_tags()).unwrap_or_default();
+    let pic = (*picture(&sample_tags())).clone().unwrap_or_default();
     assert_eq!(pic.rect, [0.0, 0.0, 100.0, 50.0]);
     assert!(pic.items.contains(&emf::Item::Line { pts: vec![Vec2::new(10.0, 10.0), Vec2::new(90.0, 10.0)], rgb: emf::Rgb(0, 0, 0) }));
     assert!(pic.items.iter().any(|i| matches!(i, emf::Item::Fill { rgb: emf::Rgb(255, 0, 0), .. })));
@@ -315,4 +315,174 @@ fn restoredc_out_of_range_is_ignored() {
     e.splice(eof..eof, extra);
     assert!(emf::play(&e).is_some());
     assert!(start.elapsed() < std::time::Duration::from_secs(1), "{:?}", start.elapsed());
+}
+
+/// A metafile of the sample header with `body` as its records.
+fn from_records(body: Vec<u8>) -> Vec<u8> {
+    let mut e = sample_emf()[..88].to_vec();
+    e.extend(body);
+    e.extend(rec(14, &ints(&[0, 0, 0])));
+    let n = e.len() as u32;
+    e[48..52].copy_from_slice(&n.to_le_bytes());
+    e
+}
+
+fn build_emf(e: &[u8]) -> crate::DisplayList {
+    build(&drawing(frame_tags(&ole_data(&compound("\u{2}OlePres000", &olepres(&wmf_with(e, 100)))))), &Space::Model, &Options::default())
+}
+
+/// The sample's records with `edit` applied to each (record type, record bytes).
+fn sample_with(prefix: Vec<u8>, edit: impl Fn(u32, &mut Vec<u8>)) -> Vec<u8> {
+    let e = sample_emf();
+    let mut pos = 88;
+    let mut body = prefix;
+    while pos < e.len() {
+        let typ = u32::from_le_bytes(e[pos..pos + 4].try_into().unwrap());
+        let len = u32::from_le_bytes(e[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        if typ == 14 {
+            break;
+        }
+        let mut r = e[pos..pos + len].to_vec();
+        edit(typ, &mut r);
+        body.extend(r);
+        pos += len;
+    }
+    from_records(body)
+}
+
+/// A POLYPOLYGON's rings are one region: with the alternate fill mode the inner ring is a hole.
+#[test]
+fn a_polypolygon_inner_ring_is_a_hole() {
+    let mut b = rec(39, &ints(&[1, 0, 0x0000FF, 0]));
+    b.extend(rec(37, &ints(&[1])));
+    b.extend(rec(37, &0x8000_0008u32.to_le_bytes()));
+    b.extend(rec(8, &ints(&[0, 0, 100, 50, 2, 8, 4, 4, 10, 10, 90, 10, 90, 40, 10, 40, 30, 20, 70, 20, 70, 30, 30, 30])));
+    let l = build_emf(&from_records(b));
+    let covers = |p: Vec2| {
+        let cross = |a: Vec2, b: Vec2| (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+        l.tris.as_chunks::<3>().0.iter().any(|[a, b, c]| {
+            let v = [cross(*a, *b), cross(*b, *c), cross(*c, *a)];
+            v.iter().all(|x| *x >= 0.0) || v.iter().all(|x| *x <= 0.0)
+        })
+    };
+    // Device (50, 25) is the hole's centre, (20, 15) inside the outer ring only; the frame maps
+    // device y down to drawing y up (50 - y).
+    assert!(!covers(Vec2::new(50.0, 25.0)), "the hole is filled");
+    assert!(covers(Vec2::new(20.0, 35.0)), "the ring around it is not");
+}
+
+/// A transform that overflows leaves no coordinate that is not finite in the picture or the
+/// display list.
+#[test]
+fn an_overflowing_transform_draws_nothing_that_is_not_finite() {
+    let mut body = Vec::new();
+    let mut xf: Vec<u8> = [1e38f32, 0., 0., 1e38, 0., 0.].into_iter().flat_map(|v| v.to_le_bytes()).collect();
+    xf.extend(2u32.to_le_bytes());
+    for _ in 0..10 {
+        body.extend(rec(36, &xf));
+    }
+    body.extend(rec(43, &ints(&[1, 1, 10, 10])));
+    let e = from_records(body);
+    let finite = |p: &Vec2| p.x.is_finite() && p.y.is_finite();
+    let p = emf::play(&e).unwrap_or_default();
+    assert!(p.items.iter().all(|i| match i {
+        emf::Item::Line { pts, .. } => pts.iter().all(finite),
+        emf::Item::Text(t) => finite(&t.at),
+        _ => true,
+    }));
+    let l = build_emf(&e);
+    assert!(l.verts.iter().chain(&l.tris).all(finite));
+}
+
+/// With ETO_PDY the advances are (x, y) pairs: each character advances by the x of its pair.
+#[test]
+fn eto_pdy_advances_take_the_x_of_each_pair() {
+    let e = sample_with(Vec::new(), |t, r| {
+        if t == 84 {
+            r[52..56].copy_from_slice(&0x2000u32.to_le_bytes());
+            let off = u32::from_le_bytes(r[72..76].try_into().unwrap()) as usize;
+            r.truncate(off);
+            r.extend(ints(&[10, 0, 20, 0]));
+            let n = r.len() as u32;
+            r[4..8].copy_from_slice(&n.to_le_bytes());
+        }
+    });
+    let p = emf::play(&e).unwrap_or_default();
+    let t = p.items.iter().find_map(|i| if let emf::Item::Text(t) = i { Some(t.clone()) } else { None });
+    assert_eq!(t.map(|t| t.advances), Some(vec![10.0, 20.0]));
+}
+
+/// A font's escapement turns its text from the device's x axis: 90° reads upward whether the
+/// mapping's y axis points down (MM_TEXT) or up (MM_LOMETRIC).
+#[test]
+fn escapement_turns_text_the_same_way_in_every_mapping() {
+    let dir = |mode: Option<u32>| {
+        let prefix = mode.map(|m| rec(17, &m.to_le_bytes())).unwrap_or_default();
+        let e = sample_with(prefix, |t, r| {
+            if t == 82 {
+                r[20..24].copy_from_slice(&900i32.to_le_bytes());
+            }
+        });
+        emf::play(&e).unwrap_or_default().items.iter().find_map(|i| if let emf::Item::Text(t) = i { Some(t.dir) } else { None })
+    };
+    // Device y grows downward: upward is negative y.
+    assert!(dir(None).is_some_and(|d| d.y < -0.9));
+    assert!(dir(Some(2)).is_some_and(|d| d.y < -0.9));
+}
+
+/// White text on a dark fill (a spreadsheet's heading) is drawn; a white fill (the background) is
+/// not.
+#[test]
+fn white_text_is_drawn_and_a_white_fill_is_not() {
+    let e = sample_with(Vec::new(), |t, r| {
+        if t == 39 {
+            // The rectangle's brush: white.
+            r[16..20].copy_from_slice(&0x00FF_FFFFu32.to_le_bytes());
+        }
+    });
+    let mut body = e[88..e.len() - 20].to_vec();
+    body.extend(rec(24, &0x00FF_FFFFu32.to_le_bytes()));
+    let text: Vec<u8> = "AB".encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    let mut t = ints(&[0, 0, 0, 0, 1]);
+    t.extend_from_slice(&1f32.to_le_bytes());
+    t.extend_from_slice(&1f32.to_le_bytes());
+    let off = 8 + t.len() as i32 + 40;
+    t.extend(ints(&[40, 30, 2, off, 0, 0, 0, -1, -1, 0]));
+    t.extend_from_slice(&text);
+    body.extend(rec(84, &t));
+    let l = build_emf(&from_records(body));
+    // True white, not colour 7 (which the frame and the black items draw with).
+    let white = |p: &&crate::display::DPrim| p.color == Rgb(255, 255, 255) && !p.aci7;
+    // The text: glyph outlines or strokes, whichever font the test machine resolves.
+    assert!(l.prims.iter().filter(white).count() > 0, "the white text");
+    let fill = |p: &&crate::display::DPrim| white(p) && p.kind == crate::display::Kind::Tris && p.len == 6;
+    assert!(!l.prims.iter().any(|p| fill(&p)), "the white rectangle");
+}
+
+/// A metafile with more points than one picture keeps stops keeping them: the picture holds at most
+/// its budget.
+#[test]
+fn a_picture_keeps_a_bounded_number_of_points() {
+    let mut body = Vec::new();
+    let n = 600_000u32;
+    for _ in 0..5 {
+        let mut r = ints(&[0, 0, 100, 50, n as i32]);
+        for i in 0..n {
+            r.extend(((i % 100) as i16).to_le_bytes());
+            r.extend(((i % 50) as i16).to_le_bytes());
+        }
+        body.extend(rec(87, &r));
+    }
+    let p = emf::play(&from_records(body)).unwrap_or_default();
+    let kept: usize = p.items.iter().map(|i| if let emf::Item::Line { pts, .. } = i { pts.len() } else { 0 }).sum();
+    assert!(kept < 5 * n as usize, "{kept} points kept");
+    assert!(kept > 0);
+}
+
+/// The same OLE data drawn twice (copies of an object, a block inserted many times) is decoded
+/// once: the second lookup returns the picture already decoded.
+#[test]
+fn the_same_ole_data_is_decoded_once() {
+    let tags = sample_tags();
+    assert!(std::sync::Arc::ptr_eq(&picture(&tags), &picture(&tags)));
 }

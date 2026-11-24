@@ -12,8 +12,17 @@ pub(crate) struct Rgb(pub u8, pub u8, pub u8);
 /// A piece of the picture, in device units (y down).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Item {
-    Line { pts: Vec<Vec2>, rgb: Rgb },
-    Fill { pts: Vec<Vec2>, rgb: Rgb },
+    Line {
+        pts: Vec<Vec2>,
+        rgb: Rgb,
+    },
+    /// One region: every ring of a record filled together, so a ring inside another is a hole
+    /// (alternate fill) or not (`winding`).
+    Fill {
+        rings: Vec<Vec<Vec2>>,
+        rgb: Rgb,
+        winding: bool,
+    },
     Text(Text),
 }
 
@@ -55,6 +64,12 @@ const MAX_OBJECTS: usize = 65_536;
 const MAX_CHARS: usize = 4096;
 /// The most points of one poly record.
 const MAX_POINTS: usize = 1_000_000;
+/// The most points kept from one metafile, all items together: a picture of a spreadsheet holds a
+/// few thousand. Past it the remaining drawing records are skipped, which bounds the memory a
+/// hostile metafile can make one picture take (its points are stored as two f64 each).
+const MAX_TOTAL_POINTS: usize = 2_000_000;
+/// ETO_PDY: the advances come in pairs (x, y).
+const ETO_PDY: u32 = 0x2000;
 
 fn u32_at(d: &[u8], o: usize) -> Option<u32> {
     Some(u32::from_le_bytes(d.get(o..o.checked_add(4)?)?.try_into().ok()?))
@@ -129,6 +144,8 @@ struct State {
     brush: Option<Rgb>,
     font: Font,
     cur: Vec2,
+    /// SETPOLYFILLMODE WINDING (else ALTERNATE).
+    winding: bool,
 }
 
 impl State {
@@ -146,6 +163,7 @@ impl State {
             brush: Some(Rgb(255, 255, 255)),
             font: Font::default(),
             cur: Vec2::new(0.0, 0.0),
+            winding: false,
         }
     }
 }
@@ -157,6 +175,8 @@ struct Player {
     /// Device pixels per millimetre, x and y (from the header).
     px_per_mm: Vec2,
     items: Vec<Item>,
+    /// Points that may still be kept ([`MAX_TOTAL_POINTS`]).
+    points_left: usize,
 }
 
 impl Player {
@@ -193,11 +213,17 @@ impl Player {
         let page = Xform([s.x, 0.0, 0.0, s.y, vo.x - wo.x * s.x, vo.y - wo.y * s.y]);
         self.st.world.then(&page)
     }
-    fn dev(&self, p: Vec2) -> Vec2 {
-        self.xform().apply(p)
-    }
+    /// Keep `it` unless it would pass the item or point budget or holds a coordinate that is not
+    /// finite (an overflowing transform).
     fn push(&mut self, it: Item) {
-        if self.items.len() < MAX_ITEMS {
+        let finite = |p: &Vec2| p.x.is_finite() && p.y.is_finite();
+        let (points, ok) = match &it {
+            Item::Line { pts, .. } => (pts.len(), pts.iter().all(finite)),
+            Item::Fill { rings, .. } => (rings.iter().map(Vec::len).sum(), rings.iter().flatten().all(finite)),
+            Item::Text(t) => (t.advances.len() + 1, finite(&t.at) && finite(&t.dir) && t.em.is_finite() && t.width_factor.is_finite()),
+        };
+        if ok && self.items.len() < MAX_ITEMS && points <= self.points_left {
+            self.points_left -= points;
             self.items.push(it);
         }
     }
@@ -205,25 +231,43 @@ impl Player {
         if let Some(rgb) = self.st.pen
             && pts.len() >= 2
         {
-            let pts = pts.into_iter().map(|p| self.dev(p)).collect();
+            let xf = self.xform();
+            let pts = pts.into_iter().map(|p| xf.apply(p)).collect();
             self.push(Item::Line { pts, rgb });
         }
     }
     /// A closed shape: filled with the brush, outlined with the pen.
     fn shape(&mut self, pts: Vec<Vec2>) {
-        if pts.len() < 3 {
+        self.shapes(vec![pts]);
+    }
+    /// Closed shapes filled as one region with the brush (by the polygon fill mode), each outlined
+    /// with the pen.
+    fn shapes(&mut self, rings: Vec<Vec<Vec2>>) {
+        let xf = self.xform();
+        let dev: Vec<Vec<Vec2>> = rings.into_iter().filter(|r| r.len() >= 3).map(|r| r.into_iter().map(|p| xf.apply(p)).collect()).collect();
+        if dev.is_empty() {
             return;
         }
-        let dev: Vec<Vec2> = pts.iter().map(|p| self.dev(*p)).collect();
+        let outlines: Vec<Vec<Vec2>> = if self.st.pen.is_some() {
+            dev.iter()
+                .map(|r| {
+                    let mut l = r.clone();
+                    if let Some(f) = l.first().copied() {
+                        l.push(f);
+                    }
+                    l
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         if let Some(rgb) = self.st.brush {
-            self.push(Item::Fill { pts: dev.clone(), rgb });
+            self.push(Item::Fill { rings: dev, rgb, winding: self.st.winding });
         }
         if let Some(rgb) = self.st.pen {
-            let mut l = dev;
-            if let Some(f) = l.first().copied() {
-                l.push(f);
+            for l in outlines {
+                self.push(Item::Line { pts: l, rgb });
             }
-            self.push(Item::Line { pts: l, rgb });
         }
     }
     fn rect_pts(l: f64, t: f64, r: f64, b: f64) -> Vec<Vec2> {
@@ -313,7 +357,12 @@ impl Player {
         let n = (n as usize).min(MAX_CHARS);
         let off = off as usize;
         let text = if wide {
-            let units: Vec<u16> = (0..n).map_while(|k| r.get(off + k * 2..off + k * 2 + 2).map(|b| u16::from_le_bytes([b[0], b[1]]))).collect();
+            let units: Vec<u16> = (0..n)
+                .map_while(|k| {
+                    let o = off.checked_add(k.checked_mul(2)?)?;
+                    r.get(o..o.checked_add(2)?).map(|b| u16::from_le_bytes([b[0], b[1]]))
+                })
+                .collect();
             String::from_utf16_lossy(&units)
         } else {
             let bytes = r.get(off..off.saturating_add(n).min(r.len())).unwrap_or_default();
@@ -323,7 +372,13 @@ impl Player {
             return;
         }
         let off_dx = u32_at(r, 72).unwrap_or(0) as usize;
-        let mut dx: Vec<f64> = if off_dx >= 76 { (0..n).map_while(|k| i32_at(r, off_dx + k * 4).map(f64::from)).collect() } else { Vec::new() };
+        // With ETO_PDY the advances are (x, y) pairs; the x of each is the advance along the text.
+        let per: usize = if u32_at(r, 52).unwrap_or(0) & ETO_PDY != 0 { 8 } else { 4 };
+        let mut dx: Vec<f64> = if off_dx >= 76 {
+            (0..n).map_while(|k| off_dx.checked_add(k.checked_mul(per)?).and_then(|o| i32_at(r, o)).map(f64::from)).collect()
+        } else {
+            Vec::new()
+        };
         let chars = text.chars().count();
         if !wide || dx.len() != n || chars != n {
             // Advances that don't pair one to one with the characters are not used.
@@ -354,24 +409,23 @@ impl Player {
             8 => -(em_log - ascent),
             _ => ascent,
         };
-        let angle = -f64::from(f.escapement) / 10.0 * std::f64::consts::PI / 180.0;
-        // The logical direction of the text and of "down" (y grows downward in device space).
-        let dir = Vec2::new(angle.cos(), angle.sin());
+        // The escapement is measured from the device's x axis, counter-clockwise as seen, whatever
+        // the mapping (GDI); in device units, whose y grows downward, that is (cos, -sin).
+        let angle = f64::from(f.escapement) / 10.0 * std::f64::consts::PI / 180.0;
+        let dir = Vec2::new(angle.cos(), -angle.sin());
         let dn = Vec2::new(-dir.y, dir.x);
-        let base = reference + dn * down;
+        let at = xf.apply(reference) + dn * (down * sy);
         let halign = match align & 6 {
             6 => 1,
             2 => 2,
             _ => 0,
         };
-        let at = xf.apply(base);
         let advances: Vec<f64> = dx.iter().map(|d| d * sx).collect();
         if align & 1 != 0 {
+            // The current position moves along the text in logical units (an unrotated mapping).
             let total: f64 = dx.iter().sum();
-            self.st.cur = reference + dir * total;
+            self.st.cur = reference + Vec2::new(total, 0.0);
         }
-        let d = xf.apply(base + dir) - at;
-        let dir = if d.len() > 0.0 { d * (1.0 / d.len()) } else { Vec2::new(1.0, 0.0) };
         self.push(Item::Text(Text { text, at, advances, em, width_factor: sx / sy, dir, face: f.face, rgb: self.st.text_rgb, halign }));
     }
 
@@ -395,6 +449,7 @@ impl Player {
             11 => self.st.vp_ext = pt(8).unwrap_or(self.st.vp_ext),
             12 => self.st.vp_org = pt(8).unwrap_or(self.st.vp_org),
             17 => self.st.map_mode = u32_at(r, 8).unwrap_or(1),
+            19 => self.st.winding = u32_at(r, 8) == Some(2),
             22 => self.st.text_align = u32_at(r, 8).unwrap_or(0),
             24 => self.st.text_rgb = colorref(u32_at(r, 8).unwrap_or(0)),
             33 => {
@@ -502,9 +557,8 @@ impl Player {
                 }
             }
             8 | 92 => {
-                for l in Self::poly_poly(r, t == 92) {
-                    self.shape(l);
-                }
+                let rings = Self::poly_poly(r, t == 92);
+                self.shapes(rings);
             }
             76 => {
                 // BITBLT without a source bitmap: a pattern fill of the destination rectangle.
@@ -557,7 +611,8 @@ pub(crate) fn play(emf: &[u8]) -> Option<Picture> {
     } else {
         return None;
     };
-    let mut p = Player { st: State::new(), saved: Vec::new(), objects: vec![None; handles], px_per_mm, items: Vec::new() };
+    let mut p =
+        Player { st: State::new(), saved: Vec::new(), objects: vec![None; handles], px_per_mm, items: Vec::new(), points_left: MAX_TOTAL_POINTS };
     let mut pos = 0usize;
     for _ in 0..MAX_RECORDS {
         let (Some(t), Some(size)) = (u32_at(emf, pos), u32_at(emf, pos + 4)) else { break };

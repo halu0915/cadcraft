@@ -153,22 +153,81 @@ fn emf_of(data: &[u8]) -> Option<Vec<u8>> {
     streams.into_iter().find(|s| (s.name == "\u{3}EPRINT" || s.name.eq_ignore_ascii_case("CONTENTS")) && is_emf(&s.data)).map(|s| s.data)
 }
 
-/// The picture of the OLE object whose tags are `tags`, played in device units.
-fn picture(tags: &[cadcraft_doc::RawTag]) -> Option<emf::Picture> {
-    emf::play(&emf_of(&payload(tags)?)?)
+/// The most pictures kept decoded, and the most points they hold together.
+const CACHE_PICTURES: usize = 256;
+const CACHE_POINTS: usize = 8_000_000;
+
+#[derive(Default)]
+struct Cache {
+    pictures: std::collections::HashMap<u64, std::sync::Arc<Option<emf::Picture>>>,
+    points: usize,
+}
+
+fn cache() -> &'static std::sync::RwLock<Cache> {
+    static CACHE: std::sync::OnceLock<std::sync::RwLock<Cache>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::RwLock::new(Cache::default()))
+}
+
+/// A hash of the OLE data groups of `tags` (what [`payload`] decodes).
+fn data_key(tags: &[cadcraft_doc::RawTag]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut in_app = false;
+    for t in tags {
+        if t.code == 102 {
+            in_app = t.value.starts_with('{');
+        } else if !in_app && t.code == 310 {
+            t.value.trim().hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
+fn picture_points(p: &emf::Picture) -> usize {
+    p.items
+        .iter()
+        .map(|i| match i {
+            emf::Item::Line { pts, .. } => pts.len(),
+            emf::Item::Fill { rings, .. } => rings.iter().map(Vec::len).sum(),
+            emf::Item::Text(t) => t.advances.len() + 1,
+        })
+        .sum()
+}
+
+/// The picture of the OLE object whose tags are `tags`, played in device units. The same OLE data
+/// (an OLE object in a block inserted many times, copies of one object) is decoded once and kept.
+fn picture(tags: &[cadcraft_doc::RawTag]) -> std::sync::Arc<Option<emf::Picture>> {
+    let key = data_key(tags);
+    if let Some(p) = cache().read().ok().and_then(|c| c.pictures.get(&key).cloned()) {
+        return p;
+    }
+    let decoded = std::sync::Arc::new(payload(tags).and_then(|d| emf_of(&d)).and_then(|e| emf::play(&e)));
+    let points = decoded.as_ref().as_ref().map_or(0, picture_points);
+    if let Ok(mut c) = cache().write() {
+        if c.pictures.len() >= CACHE_PICTURES || c.points.saturating_add(points) > CACHE_POINTS {
+            c.pictures.clear();
+            c.points = 0;
+        }
+        if points <= CACHE_POINTS {
+            c.points += points;
+            c.pictures.insert(key, decoded.clone());
+        }
+    }
+    decoded
 }
 
 /// Whether the OLE object whose tags are `tags` holds a picture CADCraft draws in its frame (an
 /// enhanced metafile presentation that plays to at least one line, fill or text).
 pub fn ole_picture_drawn(tags: &[cadcraft_doc::RawTag]) -> bool {
-    picture(tags).is_some_and(|p| !p.items.is_empty())
+    picture(tags).as_ref().as_ref().is_some_and(|p| !p.items.is_empty())
 }
 
 /// The ink an item of the picture draws with: black as colour 7 (black on paper, white on a dark
-/// screen), white not at all (it is the picture's background), other colours as they are.
-fn item_ink(c: emf::Rgb) -> Option<Ink> {
+/// screen), other colours as they are. A white fill is the picture's background and is left out
+/// (`None` for `fill`); white lines and text are drawn, as they sit on a darker fill.
+fn item_ink(c: emf::Rgb, fill: bool) -> Option<Ink> {
     match c {
-        emf::Rgb(255, 255, 255) => None,
+        emf::Rgb(255, 255, 255) if fill => None,
         emf::Rgb(0, 0, 0) => Some(super::ink(Color::Index(7), Color::Index(7), Color::Index(7))),
         emf::Rgb(r, g, b) => Some(Ink { rgb: Rgb(r, g, b), aci7: false, aci: 0 }),
     }
@@ -179,7 +238,8 @@ fn item_ink(c: emf::Rgb) -> Option<Ink> {
 /// played.
 pub(crate) fn draw(b: &mut Builder, ctx: &Ctx, tags: &[cadcraft_doc::RawTag], frame: &[Vec2; 5], lw: f32) {
     let (ul, lr) = (frame[0], frame[2]);
-    let Some(pic) = picture(tags) else { return };
+    let decoded = picture(tags);
+    let Some(pic) = decoded.as_ref() else { return };
     let [x0, y0, x1, y1] = pic.rect;
     let (dw, dh) = (x1 - x0, y1 - y0);
     if !(dw > 0.0 && dh > 0.0) || !(ul.x.is_finite() && ul.y.is_finite() && lr.x.is_finite() && lr.y.is_finite()) {
@@ -194,19 +254,22 @@ pub(crate) fn draw(b: &mut Builder, ctx: &Ctx, tags: &[cadcraft_doc::RawTag], fr
     for it in &pic.items {
         match it {
             emf::Item::Line { pts, rgb } => {
-                if let Some(ink) = item_ink(*rgb) {
+                if let Some(ink) = item_ink(*rgb, false) {
                     let pts: Vec<Vec2> = pts.iter().map(|p| map(*p)).collect();
                     b.polyline(ctx, ink, lw, &pts);
                 }
             }
-            emf::Item::Fill { pts, rgb } => {
-                let Some(ink) = item_ink(*rgb) else { continue };
-                let pts: Vec<Vec2> = pts.iter().map(|p| map(*p)).collect();
-                // A fill a pixel or less across (a ruled line drawn as a fill) is drawn as its
-                // centre line.
-                let bb = cadcraft_geom::Bounds2::from_points(pts.iter().copied());
+            emf::Item::Fill { rings, rgb, winding } => {
+                let Some(ink) = item_ink(*rgb, true) else { continue };
+                let rings: Vec<Vec<Vec2>> = rings.iter().map(|r| r.iter().map(|p| map(*p)).collect()).collect();
+                let bb = cadcraft_geom::Bounds2::from_points(rings.iter().flatten().copied());
                 let (w, h) = (bb.max.x - bb.min.x, bb.max.y - bb.min.y);
-                if pts.len() == 4 && (w <= sx.abs() * 1.01 || h <= sy.abs() * 1.01) {
+                // A one-ring fill a pixel or less across (a ruled line drawn as a fill) is drawn as
+                // its centre line.
+                if let [ring] = rings.as_slice()
+                    && ring.len() == 4
+                    && (w <= sx.abs() * 1.01 || h <= sy.abs() * 1.01)
+                {
                     let c = Vec2::new((bb.min.x + bb.max.x) / 2.0, (bb.min.y + bb.max.y) / 2.0);
                     let line = if w <= h {
                         [Vec2::new(c.x, bb.min.y), Vec2::new(c.x, bb.max.y)]
@@ -215,7 +278,9 @@ pub(crate) fn draw(b: &mut Builder, ctx: &Ctx, tags: &[cadcraft_doc::RawTag], fr
                     };
                     b.polyline(ctx, ink, lw, &line);
                 } else {
-                    let tris = super::fill::triangulate_evenodd(&[pts]);
+                    // All rings of one record make one region: alternate (even-odd) or winding
+                    // (nonzero) fill, as the metafile's polygon fill mode says.
+                    let tris = if *winding { super::text::triangulate_placed(&rings) } else { super::fill::triangulate_evenodd(&rings) };
                     b.tris(ctx, ink, &tris);
                 }
             }
@@ -223,7 +288,7 @@ pub(crate) fn draw(b: &mut Builder, ctx: &Ctx, tags: &[cadcraft_doc::RawTag], fr
                 if !b.opts.text {
                     continue;
                 }
-                let Some(ink) = item_ink(t.rgb) else { continue };
+                let Some(ink) = item_ink(t.rgb, false) else { continue };
                 let font = fonts.entry(t.face.clone()).or_insert_with(|| cadcraft_fonts::TextFont::resolve(&t.face)).clone();
                 text(b, ctx, &font, t, &map, sy.abs(), sx.abs() / sy.abs(), ink, lw);
             }
