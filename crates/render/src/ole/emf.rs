@@ -403,13 +403,18 @@ impl Player {
                 }
             }
             34 => {
-                let k = i32_at(r, 8).unwrap_or(-1);
-                let back = if k < 0 { k.unsigned_abs() as usize } else { self.saved.len().saturating_sub(k as usize).saturating_add(1) };
-                for _ in 1..back.max(1) {
-                    self.saved.pop();
-                }
-                if let Some(s) = self.saved.pop() {
-                    self.st = s;
+                // A negative level counts back from the latest saved state, a positive one is
+                // absolute (1 = the first saved). Out of range: ignored, as GDI refuses it.
+                let k = i64::from(i32_at(r, 8).unwrap_or(-1));
+                let len = self.saved.len() as i64;
+                let at = if k < 0 { len + k } else { k - 1 };
+                if (0..len).contains(&at)
+                    && let Ok(at) = usize::try_from(at)
+                {
+                    self.saved.truncate(at + 1);
+                    if let Some(s) = self.saved.pop() {
+                        self.st = s;
+                    }
                 }
             }
             35 => {

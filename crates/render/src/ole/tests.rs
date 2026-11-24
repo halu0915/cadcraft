@@ -224,7 +224,7 @@ fn a_short_last_sector_is_read_as_far_as_it_goes() {
     let mut cfb = compound("\u{2}OlePres000", &pres);
     let used = 512 * 3 + pres.len();
     cfb.truncate(used);
-    let streams = cfb::streams(&cfb).unwrap_or_default();
+    let streams = cfb::streams(&cfb, |_| true).unwrap_or_default();
     assert_eq!(streams.first().map(|s| s.data.len()), Some(pres.len()));
     assert_eq!(emf_of(&ole_data(&cfb)), Some(emf));
 }
@@ -264,4 +264,55 @@ fn an_ole_picture_is_reported_as_drawn_only_when_it_plays() {
     assert!(ole_picture_drawn(&sample_tags()));
     assert!(!ole_picture_drawn(&frame_tags(&[0xAB; 600])));
     assert!(!ole_picture_drawn(&[]));
+}
+
+/// A compound file whose directory names one presentation stream thousands of times, every entry
+/// on the same sector chain, decodes no more bytes than the file holds (each entry used to be read
+/// in full: hundreds of GiB from a 64 MiB file).
+#[test]
+fn directory_entries_sharing_a_chain_do_not_multiply_the_bytes_read() {
+    let data = vec![0x5Au8; 8 * 1024];
+    let mut cfb = compound("\u{2}OlePres000", &data);
+    // Rewrite the directory chain to run on through more directory sectors, each full of copies
+    // of the stream's entry: 4 entries a sector, as many sectors as the FAT sector maps.
+    let entry: Vec<u8> = cfb[1024 + 128..1024 + 256].to_vec();
+    let first_extra = (cfb.len() / 512 - 1) as u32;
+    let extra = 500u32;
+    let mut fat: Vec<u32> = cfb[512..1024].chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    fat[1] = first_extra;
+    for k in 0..extra {
+        let s = (first_extra + k) as usize;
+        if s >= fat.len() {
+            break;
+        }
+        fat[s] = if k + 1 == extra || s + 1 >= fat.len() { 0xFFFF_FFFE } else { first_extra + k + 1 };
+        let mut sector = Vec::with_capacity(512);
+        for _ in 0..4 {
+            sector.extend_from_slice(&entry);
+        }
+        cfb.extend(sector);
+    }
+    for (k, v) in fat.iter().enumerate() {
+        cfb[512 + k * 4..516 + k * 4].copy_from_slice(&v.to_le_bytes());
+    }
+    let read: usize = cfb::streams(&cfb, |_| true).unwrap_or_default().iter().map(|s| s.data.len()).sum();
+    assert!(read <= cfb.len(), "{read} bytes decoded from a {}-byte file", cfb.len());
+}
+
+/// RESTOREDC with a relative level far past the saved states (i32::MIN) is refused at once, and
+/// one past the states restores nothing; a valid one restores the state saved there.
+#[test]
+fn restoredc_out_of_range_is_ignored() {
+    let start = std::time::Instant::now();
+    let mut e = sample_emf();
+    // Before EOF: SAVEDC, RESTOREDC i32::MIN, RESTOREDC -2, RESTOREDC 5.
+    let eof = e.len() - 20;
+    let mut extra = rec(33, &[]);
+    extra.extend(rec(34, &i32::MIN.to_le_bytes()));
+    extra.extend(rec(34, &(-2i32).to_le_bytes()));
+    extra.extend(rec(34, &5i32.to_le_bytes()));
+    extra.extend(rec(34, &(-1i32).to_le_bytes()));
+    e.splice(eof..eof, extra);
+    assert!(emf::play(&e).is_some());
+    assert!(start.elapsed() < std::time::Duration::from_secs(1), "{:?}", start.elapsed());
 }

@@ -132,7 +132,8 @@ pub(crate) fn decode_ansi(bytes: &[u8], charset: u8) -> String {
 fn emf_of(data: &[u8]) -> Option<Vec<u8>> {
     const MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
     let at = data.windows(8).position(|w| w == MAGIC)?;
-    let mut streams = cfb::streams(data.get(at..)?)?;
+    let wanted = |n: &str| n.starts_with("\u{2}OlePres") || n == "\u{3}EPRINT" || n.eq_ignore_ascii_case("CONTENTS");
+    let mut streams = cfb::streams(data.get(at..)?, wanted)?;
     streams.sort_by(|a, b| a.name.cmp(&b.name));
     let is_emf = |d: &[u8]| u32_at(d, 0) == Some(1) && d.get(40..44) == Some(b" EMF");
     for s in streams.iter().filter(|s| s.name.starts_with("\u{2}OlePres")) {

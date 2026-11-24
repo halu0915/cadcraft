@@ -1432,7 +1432,6 @@ mod native {
         }
     }
 
-    #[cfg(test)]
     /// A proxy object that names an entity class is left out of the DWG, with the dictionary entry
     /// that named it, and reported: AutoCAD doesn't open a drawing with one. CADCraft 0.17.0 wrote
     /// such drawings (an AutoLISP application's object came back naming a block grip entity
@@ -1471,6 +1470,8 @@ mod native {
             assert!(keys.contains(&"ACME_STORE") && !keys.contains(&"ACME_STRAY"), "{version}: {keys:?}");
         }
     }
+
+    #[cfg(test)]
     mod application_object_tests {
         use super::*;
         use acadrust::CadDocument;

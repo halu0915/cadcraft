@@ -64,9 +64,9 @@ impl Reader<'_> {
     }
 }
 
-/// The streams of the compound file at the start of `data` (any storage, flattened), or `None`
-/// when it is not one. Streams whose chains are broken come back as far as they could be read.
-pub(crate) fn streams(data: &[u8]) -> Option<Vec<Stream>> {
+/// The streams of the compound file at the start of `data` (any storage, flattened) whose names
+/// `wanted` accepts, or `None` when it is not one. Together they hold at most `data.len()` bytes. Streams whose chains are broken come back as far as they could be read.
+pub(crate) fn streams(data: &[u8], wanted: impl Fn(&str) -> bool) -> Option<Vec<Stream>> {
     if data.get(..8)? != MAGIC {
         return None;
     }
@@ -111,6 +111,9 @@ pub(crate) fn streams(data: &[u8]) -> Option<Vec<Stream>> {
     let mini_fat_bytes = r.regular(mini_fat_start, data.len());
     let mini_fat = words(&mini_fat_bytes);
     let mut out = Vec::new();
+    // The stream bytes decoded in all: no more than the file holds. A hostile directory can point
+    // any number of entries at one sector chain; each would otherwise be read in full.
+    let mut budget = data.len();
     for e in entries.iter().skip(1) {
         if e.get(66) != Some(&STREAM) {
             continue;
@@ -119,8 +122,14 @@ pub(crate) fn streams(data: &[u8]) -> Option<Vec<Stream>> {
         let units: Vec<u16> =
             e.get(..name_len.saturating_sub(2)).unwrap_or_default().as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
         let name = String::from_utf16_lossy(&units);
+        if !wanted(&name) {
+            continue;
+        }
         let (Some(start), Some(size)) = (u32_at(e, 116), u32_at(e, 120)) else { continue };
-        let size = (size as usize).min(data.len());
+        let size = (size as usize).min(budget);
+        if size == 0 {
+            continue;
+        }
         let bytes = if size < cutoff {
             Reader::chain(start, &mini_fat, size, |i| {
                 let o = (i as usize).checked_mul(mini)?;
@@ -130,6 +139,7 @@ pub(crate) fn streams(data: &[u8]) -> Option<Vec<Stream>> {
         } else {
             r.regular(start, size)
         };
+        budget = budget.saturating_sub(bytes.len().max(1));
         out.push(Stream { name, data: bytes });
     }
     Some(out)
