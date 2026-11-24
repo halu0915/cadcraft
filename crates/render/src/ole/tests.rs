@@ -486,3 +486,22 @@ fn the_same_ole_data_is_decoded_once() {
     let tags = sample_tags();
     assert!(std::sync::Arc::ptr_eq(&picture(&tags), &picture(&tags)));
 }
+
+/// In the advanced graphics mode the world transform turns text too: under a quarter turn a
+/// string with no escapement runs vertically, and its baseline offset turns with it.
+#[test]
+fn a_turning_world_transform_turns_advanced_mode_text() {
+    let turn: Vec<u8> = [0f32, 1., -1., 0., 0., 0.].into_iter().flat_map(|v| v.to_le_bytes()).collect();
+    let text = |advanced: bool| {
+        let e = sample_with(rec(35, &turn), |t, r| {
+            if t == 84 && advanced {
+                r[24..28].copy_from_slice(&2u32.to_le_bytes());
+            }
+        });
+        emf::play(&e).unwrap_or_default().items.iter().find_map(|i| if let emf::Item::Text(t) = i { Some(t.clone()) } else { None })
+    };
+    let Some(t) = text(true) else { panic!("no text") };
+    assert!(t.dir.x.abs() < 0.1 && t.dir.y.abs() > 0.9, "advanced mode: {:?}", t.dir);
+    // Compatible mode keeps text upright whatever the transform.
+    assert!(text(false).is_some_and(|t| t.dir.x > 0.9));
+}

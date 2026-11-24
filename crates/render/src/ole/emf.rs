@@ -412,8 +412,22 @@ impl Player {
         // The escapement is measured from the device's x axis, counter-clockwise as seen, whatever
         // the mapping (GDI); in device units, whose y grows downward, that is (cos, -sin).
         let angle = f64::from(f.escapement) / 10.0 * std::f64::consts::PI / 180.0;
-        let dir = Vec2::new(angle.cos(), -angle.sin());
-        let dn = Vec2::new(-dir.y, dir.x);
+        let mut dir = Vec2::new(angle.cos(), -angle.sin());
+        let mut dn = Vec2::new(-dir.y, dir.x);
+        // In the advanced graphics mode (iGraphicsMode 2) the world transform applies to text as
+        // to everything else: its linear part turns the direction and the baseline offset. Only
+        // their directions are taken; the em height already carries the scale.
+        if u32_at(r, 24) == Some(2) {
+            let w = self.st.world.0;
+            let turn = |v: Vec2| {
+                let t = Vec2::new(w[0] * v.x + w[2] * v.y, w[1] * v.x + w[3] * v.y);
+                let l = t.len();
+                (l > 0.0 && l.is_finite()).then(|| t * (1.0 / l))
+            };
+            if let (Some(d), Some(n)) = (turn(dir), turn(dn)) {
+                (dir, dn) = (d, n);
+            }
+        }
         let at = xf.apply(reference) + dn * (down * sy);
         let halign = match align & 6 {
             6 => 1,
