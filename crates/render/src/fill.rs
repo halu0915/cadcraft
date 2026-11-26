@@ -9,7 +9,18 @@ use cadcraft_geom::{Polyline, Vec2};
 /// crossing and each part is paired on its own. Robust for any input; output size is
 /// O(slabs × crossings), capped for hostile inputs.
 pub fn triangulate_evenodd(loops: &[Vec<Vec2>]) -> Vec<Vec2> {
-    let mut edges: Vec<(Vec2, Vec2)> = Vec::new();
+    triangulate_slabs(loops, false)
+}
+
+/// [`triangulate_evenodd`] by the nonzero rule: a point is inside when the loops wind around it
+/// a nonzero number of times, so a loop nested in another of the same direction stays filled.
+pub fn triangulate_nonzero(loops: &[Vec<Vec2>]) -> Vec<Vec2> {
+    triangulate_slabs(loops, true)
+}
+
+fn triangulate_slabs(loops: &[Vec<Vec2>], nonzero: bool) -> Vec<Vec2> {
+    // Each edge runs upward, with +1 when its loop went up along it and -1 when it went down.
+    let mut edges: Vec<(Vec2, Vec2, i32)> = Vec::new();
     for l in loops {
         let n = l.len();
         if n < 3 {
@@ -18,19 +29,19 @@ pub fn triangulate_evenodd(loops: &[Vec<Vec2>]) -> Vec<Vec2> {
         for i in 0..n {
             let (Some(&a), Some(&b)) = (l.get(i), l.get((i + 1) % n)) else { continue };
             if (a.y - b.y).abs() > 1e-15 && a.is_finite() && b.is_finite() {
-                edges.push(if a.y < b.y { (a, b) } else { (b, a) });
+                edges.push(if a.y < b.y { (a, b, 1) } else { (b, a, -1) });
             }
         }
     }
     if edges.is_empty() || edges.len() > 200_000 {
         return Vec::new();
     }
-    let mut ys: Vec<f64> = edges.iter().flat_map(|(a, b)| [a.y, b.y]).collect();
+    let mut ys: Vec<f64> = edges.iter().flat_map(|(a, b, _)| [a.y, b.y]).collect();
     ys.sort_by(f64::total_cmp);
     ys.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
     edges.sort_by(|a, b| a.0.y.total_cmp(&b.0.y));
     let mut out = Vec::new();
-    let mut active: Vec<(Vec2, Vec2)> = Vec::new();
+    let mut active: Vec<(Vec2, Vec2, i32)> = Vec::new();
     let mut next = 0usize;
     // Slabs created by cutting at crossings, over the whole region; past this the remaining
     // crossings are left unsplit rather than letting a hostile input run away.
@@ -52,7 +63,7 @@ pub fn triangulate_evenodd(loops: &[Vec<Vec2>]) -> Vec<Vec2> {
         pending.push((y0, y1));
         while let Some((ya, yb)) = pending.pop() {
             let ymid = (ya + yb) / 2.0;
-            let mut xs: Vec<(f64, f64, f64)> = active.iter().map(|e| (x_at(e, ymid), x_at(e, ya), x_at(e, yb))).collect();
+            let mut xs: Vec<(f64, f64, f64, i32)> = active.iter().map(|e| (x_at(e, ymid), x_at(e, ya), x_at(e, yb), e.2)).collect();
             xs.sort_by(|a, b| a.0.total_cmp(&b.0));
             if cuts_left > 0 {
                 let mut cuts: Vec<f64> = Vec::new();
@@ -77,10 +88,29 @@ pub fn triangulate_evenodd(loops: &[Vec<Vec2>]) -> Vec<Vec2> {
                     continue;
                 }
             }
-            for pair in xs.chunks(2) {
-                if let [l, r] = pair {
-                    let (a, b, c, d) = (Vec2::new(l.1, ya), Vec2::new(r.1, ya), Vec2::new(r.2, yb), Vec2::new(l.2, yb));
-                    out.extend_from_slice(&[a, b, c, a, c, d]);
+            let mut trap = |l: &(f64, f64, f64, i32), r: &(f64, f64, f64, i32)| {
+                let (a, b, c, d) = (Vec2::new(l.1, ya), Vec2::new(r.1, ya), Vec2::new(r.2, yb), Vec2::new(l.2, yb));
+                out.extend_from_slice(&[a, b, c, a, c, d]);
+            };
+            if nonzero {
+                // From the edge where the winding number leaves zero to the one where it returns.
+                let (mut wind, mut left) = (0i32, None);
+                for e in &xs {
+                    let before = wind;
+                    wind = wind.saturating_add(e.3);
+                    if before == 0 && wind != 0 {
+                        left = Some(*e);
+                    } else if before != 0 && wind == 0
+                        && let Some(l) = left.take()
+                    {
+                        trap(&l, e);
+                    }
+                }
+            } else {
+                for pair in xs.chunks(2) {
+                    if let [l, r] = pair {
+                        trap(l, r);
+                    }
                 }
             }
             if out.len() > 6_000_000 {
@@ -94,14 +124,14 @@ pub fn triangulate_evenodd(loops: &[Vec<Vec2>]) -> Vec<Vec2> {
 /// How many extra slab boundaries crossings may add over one region.
 const MAX_CROSSING_CUTS: usize = 100_000;
 
-fn x_at(e: &(Vec2, Vec2), y: f64) -> f64 {
+fn x_at(e: &(Vec2, Vec2, i32), y: f64) -> f64 {
     let t = (y - e.0.y) / (e.1.y - e.0.y);
     e.0.x + (e.1.x - e.0.x) * t
 }
 
 /// Where two edges ordered `l` before `r` at the slab's middle swap sides, if that happens
 /// strictly inside the slab. Each entry is (x at the middle, x at `ya`, x at `yb`).
-fn crossing_y(l: &(f64, f64, f64), r: &(f64, f64, f64), ya: f64, yb: f64) -> Option<f64> {
+fn crossing_y(l: &(f64, f64, f64, i32), r: &(f64, f64, f64, i32), ya: f64, yb: f64) -> Option<f64> {
     let (da, db) = (l.1 - r.1, l.2 - r.2);
     // Ordered at the middle, so a swap shows as `l` right of `r` at one boundary.
     if da <= 0.0 && db <= 0.0 {
@@ -162,6 +192,26 @@ mod tests {
         let hole = vec![Vec2::new(4.0, 4.0), Vec2::new(6.0, 4.0), Vec2::new(6.0, 6.0), Vec2::new(4.0, 6.0)];
         let t = triangulate_evenodd(&[outer, hole]);
         assert!((area(&t) - 96.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn nonzero_keeps_a_same_direction_inner_loop_filled() {
+        let sq = |a: f64, b: f64| vec![Vec2::new(a, a), Vec2::new(b, a), Vec2::new(b, b), Vec2::new(a, b)];
+        let (outer, inner) = (sq(0.0, 10.0), sq(4.0, 6.0));
+        assert!((area(&triangulate_nonzero(&[outer.clone(), inner.clone()])) - 100.0).abs() < 1e-9);
+        // An inner loop the other way round winds back to zero: a hole, as by even-odd.
+        let reversed: Vec<Vec2> = inner.iter().rev().copied().collect();
+        assert!((area(&triangulate_nonzero(&[outer.clone(), reversed])) - 96.0).abs() < 1e-9);
+        assert!((area(&triangulate_evenodd(&[outer, inner])) - 96.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn nonzero_fills_two_crossing_loops_as_their_union() {
+        // Two 10x10 squares overlapping in a 5x10 strip, both counter-clockwise.
+        let a = vec![Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0), Vec2::new(10.0, 10.0), Vec2::new(0.0, 10.0)];
+        let b: Vec<Vec2> = a.iter().map(|p| Vec2::new(p.x + 5.0, p.y)).collect();
+        assert!((area(&triangulate_nonzero(&[a.clone(), b.clone()])) - 150.0).abs() < 1e-9);
+        assert!((area(&triangulate_evenodd(&[a, b])) - 100.0).abs() < 1e-9);
     }
 
     #[test]

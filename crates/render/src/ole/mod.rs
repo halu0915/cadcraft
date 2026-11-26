@@ -279,8 +279,8 @@ pub(crate) fn draw(b: &mut Builder, ctx: &Ctx, tags: &[cadcraft_doc::RawTag], fr
                     b.polyline(ctx, ink, lw, &line);
                 } else {
                     // All rings of one record make one region: alternate (even-odd) or winding
-                    // (nonzero) fill, as the metafile's polygon fill mode says.
-                    let tris = if *winding { super::text::triangulate_placed(&rings) } else { super::fill::triangulate_evenodd(&rings) };
+                    // (nonzero) fill, as the metafile's polygon fill mode says, at any size.
+                    let tris = if *winding { super::fill::triangulate_nonzero(&rings) } else { super::fill::triangulate_evenodd(&rings) };
                     b.tris(ctx, ink, &tris);
                 }
             }

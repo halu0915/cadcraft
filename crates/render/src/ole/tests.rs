@@ -505,3 +505,32 @@ fn a_turning_world_transform_turns_advanced_mode_text() {
     // Compatible mode keeps text upright whatever the transform.
     assert!(text(false).is_some_and(|t| t.dir.x > 0.9));
 }
+
+/// A WINDING polypolygon whose rings run the same way fills the inner ring, also in a frame large
+/// enough that the fill cannot go through the glyph tessellator (more than 1e6 across).
+#[test]
+fn a_winding_polypolygon_fills_a_same_direction_inner_ring_at_any_size() {
+    let mut b = rec(39, &ints(&[1, 0, 0x0000FF, 0]));
+    b.extend(rec(37, &ints(&[1])));
+    b.extend(rec(37, &0x8000_0008u32.to_le_bytes()));
+    b.extend(rec(19, &ints(&[2])));
+    // Both rings clockwise on the device: (10,10)-(90,10)-(90,40)-(10,40), (30,20)-(70,20)-(70,30)-(30,30).
+    b.extend(rec(8, &ints(&[0, 0, 100, 50, 2, 8, 4, 4, 10, 10, 90, 10, 90, 40, 10, 40, 30, 20, 70, 20, 70, 30, 30, 30])));
+    let e = from_records(b);
+    for scale in [1.0, 1.0e5] {
+        let mut tags = frame_tags(&ole_data(&compound("\u{2}OlePres000", &olepres(&wmf_with(&e, 100)))));
+        tags[1].value = (50.0 * scale).to_string();
+        tags[2].value = (100.0 * scale).to_string();
+        let l = build(&drawing(tags), &Space::Model, &Options::default());
+        let covers = |p: Vec2| {
+            let cross = |a: Vec2, b: Vec2| (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+            l.tris.as_chunks::<3>().0.iter().any(|[a, b, c]| {
+                let v = [cross(*a, *b), cross(*b, *c), cross(*c, *a)];
+                v.iter().all(|x| *x >= 0.0) || v.iter().all(|x| *x <= 0.0)
+            })
+        };
+        assert!(covers(Vec2::new(50.0, 25.0) * scale), "inner ring left empty at scale {scale}");
+        assert!(covers(Vec2::new(20.0, 35.0) * scale), "outer ring empty at scale {scale}");
+        assert!(!covers(Vec2::new(5.0, 5.0) * scale), "outside filled at scale {scale}");
+    }
+}
