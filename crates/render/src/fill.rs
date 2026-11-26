@@ -100,7 +100,8 @@ fn triangulate_slabs(loops: &[Vec<Vec2>], nonzero: bool) -> Vec<Vec2> {
                     wind = wind.saturating_add(e.3);
                     if before == 0 && wind != 0 {
                         left = Some(*e);
-                    } else if before != 0 && wind == 0
+                    } else if before != 0
+                        && wind == 0
                         && let Some(l) = left.take()
                     {
                         trap(&l, e);
