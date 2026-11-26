@@ -216,6 +216,24 @@ mod tests {
     }
 
     #[test]
+    fn nonzero_fills_a_pentagram_centre_through_crossing_cuts() {
+        // A five-pointed star drawn in one stroke: its edges cross inside slabs, and the centre
+        // pentagon is wound twice (filled by nonzero, a hole by even-odd).
+        let star: Vec<Vec2> = (0..5)
+            .map(|k| {
+                let a = std::f64::consts::FRAC_PI_2 + f64::from(k) * 4.0 * std::f64::consts::PI / 5.0;
+                Vec2::new(10.0 * a.cos(), 10.0 * a.sin())
+            })
+            .collect();
+        let (nz, eo) = (triangulate_nonzero(std::slice::from_ref(&star)), triangulate_evenodd(std::slice::from_ref(&star)));
+        let centre = Vec2::new(0.0, 0.1);
+        let tip = Vec2::new(0.0, 8.0);
+        assert!(cover(&nz, centre) > 0 && cover(&eo, centre) == 0);
+        assert!(cover(&nz, tip) > 0 && cover(&eo, tip) > 0);
+        assert!(area(&nz) > area(&eo));
+    }
+
+    #[test]
     fn triangle_area() {
         let t = triangulate_evenodd(&[vec![Vec2::new(0.0, 0.0), Vec2::new(4.0, 0.0), Vec2::new(0.0, 3.0)]]);
         assert!((area(&t) - 6.0).abs() < 1e-9);
