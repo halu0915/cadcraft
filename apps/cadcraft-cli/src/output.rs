@@ -165,10 +165,12 @@ pub(crate) fn undrawn_message(d: &cadcraft_engine::doc::Drawing, path: &str) -> 
     let mut ole = 0usize;
     for e in d.model.iter() {
         // An OLE2FRAME's frame outline is drawn, so it isn't an undrawn entity; its content is
-        // not, which gets a note of its own.
+        // drawn when it holds a picture CADCraft plays, else it gets a note of its own.
         if let cadcraft_engine::doc::EntityKind::Unknown(u) = &e.kind {
             if u.is_ole_frame() && cadcraft_engine::doc::ole_frame(&u.tags).is_some() {
-                ole = ole.saturating_add(1);
+                if !cadcraft_engine::render::ole_picture_drawn(&u.tags) {
+                    ole = ole.saturating_add(1);
+                }
                 continue;
             }
             let n = types.entry(u.dxf_type.as_str()).or_insert(0);

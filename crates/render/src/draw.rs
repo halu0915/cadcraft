@@ -227,10 +227,12 @@ fn entity_parts(b: &mut Builder, ctx: &Ctx, e: &Entity) {
                 b.polyline(ctx, rgb, lw, l);
             }
         }
-        // An OLE object's content is not drawn; its frame, from its two corner points, is.
+        // An OLE object draws its frame, from its two corner points, and the picture its
+        // presentation stream holds, fitted to the frame.
         EntityKind::Unknown(u) if u.is_ole_frame() => {
             if let Some(q) = cadcraft_doc::ole_frame(&u.tags) {
                 b.polyline(ctx, rgb, lw, &q);
+                crate::ole::draw(b, ctx, &u.tags, &q, lw);
             }
         }
         kind => {
